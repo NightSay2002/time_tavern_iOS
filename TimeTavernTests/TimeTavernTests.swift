@@ -3,6 +3,22 @@ import ZIPFoundation
 @testable import TimeTavern
 
 final class TimeTavernTests: XCTestCase {
+    func testAppTabsKeepExpectedNavigationLabels() {
+        XCTAssertEqual(AppTab.allCases.count, 5)
+        XCTAssertEqual(AppTab.allCases.map(\.title), ["對話", "角色", "存檔", "工房", "設定"])
+    }
+
+    func testVisualNovelComposerSendDisabledState() {
+        XCTAssertTrue(VisualNovelComposer.isSendDisabled(isGenerating: false, text: "   \n"))
+        XCTAssertFalse(VisualNovelComposer.isSendDisabled(isGenerating: false, text: "開始故事"))
+        XCTAssertFalse(VisualNovelComposer.isSendDisabled(isGenerating: true, text: ""))
+    }
+
+    func testCharacterStatusChipTitle() {
+        XCTAssertEqual(CharacterStatusCard.statusTitle(isReady: false), "Idle")
+        XCTAssertEqual(CharacterStatusCard.statusTitle(isReady: true), "Ready")
+    }
+
     func testSecretStoreRoundTrip() throws {
         let store = SecretStore()
         try store.save("test-key-\(UUID().uuidString)", for: .deepSeekAPIKey)
