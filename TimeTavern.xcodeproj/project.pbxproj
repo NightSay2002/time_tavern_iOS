@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 60;
+	objectVersion = 63;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -14,9 +14,10 @@
 		100000000000000000000005 /* ImportExportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000105 /* ImportExportService.swift */; };
 		100000000000000000000006 /* TimeTavernStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000106 /* TimeTavernStore.swift */; };
 		100000000000000000000007 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000107 /* Views.swift */; };
-		100000000000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000108 /* Assets.xcassets */; };
+		100000000000000000000008 /* Resources/Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000108 /* Resources/Assets.xcassets */; };
 		100000000000000000000009 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000401 /* ZIPFoundation */; };
 		100000000000000000000010 /* TimeTavernTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000201 /* TimeTavernTests.swift */; };
+		100000000000000000000011 /* Resources/WebDefaults in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000110 /* Resources/WebDefaults */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -37,8 +38,9 @@
 		100000000000000000000105 /* ImportExportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportExportService.swift; sourceTree = "<group>"; };
 		100000000000000000000106 /* TimeTavernStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeTavernStore.swift; sourceTree = "<group>"; };
 		100000000000000000000107 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
-		100000000000000000000108 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Resources/Assets.xcassets; sourceTree = "<group>"; };
+		100000000000000000000108 /* Resources/Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Resources/Assets.xcassets; sourceTree = "<group>"; };
 		100000000000000000000109 /* TimeTavern.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TimeTavern.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		100000000000000000000110 /* Resources/WebDefaults */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/WebDefaults; sourceTree = "<group>"; };
 		100000000000000000000201 /* TimeTavernTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeTavernTests.swift; sourceTree = "<group>"; };
 		100000000000000000000202 /* TimeTavernTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TimeTavernTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -81,7 +83,8 @@
 				100000000000000000000105 /* ImportExportService.swift */,
 				100000000000000000000106 /* TimeTavernStore.swift */,
 				100000000000000000000107 /* Views.swift */,
-				100000000000000000000108 /* Assets.xcassets */,
+				100000000000000000000108 /* Resources/Assets.xcassets */,
+				100000000000000000000110 /* Resources/WebDefaults */,
 			);
 			path = TimeTavern;
 			sourceTree = "<group>";
@@ -176,7 +179,6 @@
 			packageReferences = (
 				100000000000000000000400 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
 			);
-			preferredProjectObjectVersion = 60;
 			productRefGroup = 100000000000000000000504 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -192,7 +194,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				100000000000000000000008 /* Assets.xcassets in Resources */,
+				100000000000000000000008 /* Resources/Assets.xcassets in Resources */,
+				100000000000000000000011 /* Resources/WebDefaults in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -363,6 +366,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = VJPLK989WH;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Time Tavern";
@@ -393,6 +397,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = VJPLK989WH;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Time Tavern";

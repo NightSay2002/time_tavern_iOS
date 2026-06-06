@@ -16,6 +16,7 @@ final class TimeTavernStore: ObservableObject {
     private let novelAIClient = NovelAIClient()
     private let conversationEngine = ConversationEngine()
     private let importExportService = ImportExportService()
+    private let bundledWebDefaultsService = BundledWebDefaultsService()
     private var database: AppDatabase?
     private var generationTask: Task<Void, Never>?
 
@@ -49,10 +50,7 @@ final class TimeTavernStore: ObservableObject {
     func createRoleCard() {
         var card = RoleCard()
         card.name = "新角色"
-        card.customSections = [
-            CustomSection(name: "性格", content: ""),
-            CustomSection(name: "場景", content: "")
-        ]
+        card.customSections = []
         state.roleCards.insert(card, at: 0)
         persist()
     }
@@ -236,6 +234,44 @@ final class TimeTavernStore: ObservableObject {
         }
     }
 
+    func bundledWebDefaultsSummary() -> BundledWebDefaultsSummary? {
+        try? bundledWebDefaultsService.summary()
+    }
+
+    func restoreBundledWebDefaults() {
+        do {
+            let restored = try bundledWebDefaultsService.loadDefaults()
+            let backup = conversationEngine.branchSession(from: state, name: "還原網頁預設前備份")
+            let preservedSessions = state.savedSessions
+            let preservedAlbum = state.novelAIAlbum
+            let preservedLogs = state.aiLogs
+            let preservedAPISettings = state.apiSettings
+            let preservedStudioSettings = state.novelAIStudioSettings
+
+            var next = state
+            next.roleCards = restored.roleCards
+            next.promptModes = restored.promptModes
+            next.userProfile = restored.userProfile
+            next.timeTracking = restored.timeTracking
+            next.activeRoleCardId = restored.activeRoleCardId
+            next.activeAssistantMode = restored.activeAssistantMode
+            next.conversation = []
+            next.savedSessions = [backup] + preservedSessions
+            next.novelAIAlbum = preservedAlbum
+            next.aiLogs = preservedLogs
+            next.novelAIStudioSettings = preservedStudioSettings
+            next.apiSettings = preservedAPISettings
+            if !restored.apiSettings.deepSeekModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                next.apiSettings.deepSeekModel = restored.apiSettings.deepSeekModel
+            }
+            state = next
+            statusText = "已還原網頁預設：\(restored.roleCards.count) 張角色卡、\(restored.promptModes.count) 個 Prompt 模式。"
+            persist()
+        } catch {
+            statusText = "還原網頁預設失敗：\(error.localizedDescription)"
+        }
+    }
+
     func testDeepSeek() {
         Task {
             do {
@@ -259,20 +295,27 @@ final class TimeTavernStore: ObservableObject {
     }
 
     func generateNovelAIImage(prompt: String, negativePrompt: String, model: String, width: Int, height: Int, steps: Int, scale: Double) {
+        var studioSettings = state.novelAIStudioSettings
+        studioSettings.basePrompt = prompt
+        studioSettings.negativePrompt = negativePrompt
+        studioSettings.imageSettings.model = model
+        studioSettings.imageSettings.width = width
+        studioSettings.imageSettings.height = height
+        studioSettings.imageSettings.steps = steps
+        studioSettings.imageSettings.scale = scale
+        generateNovelAIImage(studioSettings: studioSettings)
+    }
+
+    func generateNovelAIImage(studioSettings: NovelAIStudioSettings) {
         Task {
             do {
-                let images = try await novelAIClient.generateImage(
+                let images = try await novelAIClient.generateImages(
                     apiKey: novelAIKey,
                     settings: state.apiSettings,
-                    prompt: prompt,
-                    negativePrompt: negativePrompt,
-                    model: model,
-                    width: width,
-                    height: height,
-                    steps: steps,
-                    scale: scale
+                    studioSettings: studioSettings
                 )
                 await MainActor.run {
+                    state.novelAIStudioSettings = studioSettings
                     state.novelAIAlbum.insert(contentsOf: images, at: 0)
                     statusText = "NovelAI 已生成 \(images.count) 張圖片。"
                     persist()
@@ -281,6 +324,11 @@ final class TimeTavernStore: ObservableObject {
                 await MainActor.run { statusText = error.localizedDescription }
             }
         }
+    }
+
+    func deleteNovelAIAlbumItems(at offsets: IndexSet) {
+        state.novelAIAlbum.remove(atOffsets: offsets)
+        persist()
     }
 
     private func trimRuntimeLimits() {

@@ -265,40 +265,146 @@ final class NovelAIClient {
         steps: Int,
         scale: Double
     ) async throws -> [NovelAIAlbumItem] {
+        var studioSettings = NovelAIStudioSettings()
+        studioSettings.basePrompt = prompt
+        studioSettings.negativePrompt = negativePrompt
+        studioSettings.imageSettings.model = model
+        studioSettings.imageSettings.width = width
+        studioSettings.imageSettings.height = height
+        studioSettings.imageSettings.steps = steps
+        studioSettings.imageSettings.scale = scale
+        return try await generateImages(apiKey: apiKey, settings: settings, studioSettings: studioSettings)
+    }
+
+    func generateImages(
+        apiKey: String,
+        settings: APISettings,
+        studioSettings: NovelAIStudioSettings
+    ) async throws -> [NovelAIAlbumItem] {
         guard !apiKey.isEmpty else { throw TimeTavernError.missingNovelAIKey }
         let url = URL(string: settings.naiImageBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/ai/generate-image")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 600
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue(Self.correlationID(), forHTTPHeaderField: "x-correlation-id")
-        let payload = NovelAIRequest(
+        let loops = max(1, min(studioSettings.loopCount, 20))
+        var results: [NovelAIAlbumItem] = []
+        for _ in 0..<loops {
+            let prompt = Self.resolvedPrompt(from: studioSettings)
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 600
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue(Self.correlationID(), forHTTPHeaderField: "x-correlation-id")
+            let payload = Self.buildImageGenerationRequest(studioSettings: studioSettings, prompt: prompt)
+            request.httpBody = try JSONEncoder().encode(payload)
+            let (data, response) = try await session.data(for: request)
+            try validateHTTP(response, data: data)
+            results.append(contentsOf: try extractImages(
+                fromZipData: data,
+                prompt: prompt,
+                negativePrompt: studioSettings.negativePrompt,
+                model: studioSettings.imageSettings.model
+            ))
+        }
+        return results
+    }
+
+    static func resolvedPrompt(from settings: NovelAIStudioSettings, randomIndex: ((Int) -> Int)? = nil) -> String {
+        var prompt = settings.basePrompt
+        let fixed = settings.fixedSnippets.filter(\.enabled)
+        let random = settings.randomSnippets.filter(\.enabled)
+        let snippets = fixed + selectedRandomSnippets(random, randomIndex: randomIndex)
+        for snippet in snippets where !snippet.name.isEmpty {
+            prompt = prompt.replacingOccurrences(of: "||\(snippet.name)||", with: snippet.content)
+        }
+        let appendedSnippets = snippets.filter { !prompt.contains($0.content) }.map(\.content)
+        let characterPrompts = settings.characterPrompts
+            .filter(\.enabled)
+            .map { $0.name.isEmpty ? $0.prompt : "\($0.name): \($0.prompt)" }
+        return ([prompt] + appendedSnippets + characterPrompts)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+    }
+
+    static func buildImageGenerationRequest(studioSettings: NovelAIStudioSettings, prompt: String? = nil) -> NovelAIRequest {
+        let imageSettings = studioSettings.imageSettings
+        let resolvedPrompt = prompt ?? resolvedPrompt(from: studioSettings)
+        let references = studioSettings.vibeTransferImages.filter { $0.enabled && $0.imageData != nil }
+        let preciseReferences = studioSettings.preciseReferenceImages.filter { $0.enabled && $0.imageData != nil }
+        return NovelAIRequest(
             action: "generate",
-            input: prompt,
-            model: model,
+            input: resolvedPrompt,
+            model: imageSettings.model,
             parameters: NovelAIParameters(
-                width: width,
-                height: height,
-                scale: scale,
-                sampler: "k_euler_ancestral",
-                steps: steps,
-                nSamples: 1,
-                ucPreset: 0,
+                width: imageSettings.width,
+                height: imageSettings.height,
+                scale: imageSettings.scale,
+                sampler: imageSettings.sampler,
+                steps: imageSettings.steps,
+                nSamples: max(1, min(imageSettings.samples, 8)),
+                ucPreset: imageSettings.ucPreset,
                 qualityToggle: true,
                 dynamicThresholding: false,
-                sm: false,
-                smDyn: false,
-                cfgRescale: 0,
-                imageFormat: "png",
-                prompt: prompt,
-                negativePrompt: negativePrompt
+                sm: imageSettings.varietyPlus,
+                smDyn: imageSettings.varietyPlus,
+                cfgRescale: imageSettings.cfgRescale,
+                imageFormat: imageSettings.imageFormat,
+                prompt: resolvedPrompt,
+                negativePrompt: studioSettings.negativePrompt,
+                noiseSchedule: imageSettings.noiseSchedule,
+                seed: imageSettings.seed,
+                image: studioSettings.imageToImageImageData?.base64EncodedString(),
+                strength: studioSettings.imageToImageImageData == nil ? nil : studioSettings.imageToImageStrength,
+                noise: studioSettings.imageToImageImageData == nil ? nil : studioSettings.imageToImageNoise,
+                referenceImageMultiple: (references + preciseReferences).compactMap { $0.imageData?.base64EncodedString() },
+                referenceInformationExtractedMultiple: (references + preciseReferences).map(\.noise),
+                referenceStrengthMultiple: (references + preciseReferences).map(\.strength)
             )
         )
-        request.httpBody = try JSONEncoder().encode(payload)
-        let (data, response) = try await session.data(for: request)
-        try validateHTTP(response, data: data)
-        return try extractImages(fromZipData: data, prompt: prompt, negativePrompt: negativePrompt, model: model)
+    }
+
+    static func settingsByImportingMetadata(_ metadata: String, into settings: NovelAIStudioSettings) -> NovelAIStudioSettings {
+        guard let data = metadata.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return settings }
+        var next = settings
+        if let input = object["input"] as? String {
+            next.basePrompt = input
+        }
+        if let model = object["model"] as? String {
+            next.imageSettings.model = model
+        }
+        let parameters = object["parameters"] as? [String: Any] ?? object
+        if let negative = parameters["negative_prompt"] as? String {
+            next.negativePrompt = negative
+        }
+        if let width = parameters["width"] as? Int {
+            next.imageSettings.width = width
+        }
+        if let height = parameters["height"] as? Int {
+            next.imageSettings.height = height
+        }
+        if let steps = parameters["steps"] as? Int {
+            next.imageSettings.steps = steps
+        }
+        if let scale = parameters["scale"] as? Double {
+            next.imageSettings.scale = scale
+        }
+        if let sampler = parameters["sampler"] as? String {
+            next.imageSettings.sampler = sampler
+        }
+        if let cfgRescale = parameters["cfg_rescale"] as? Double {
+            next.imageSettings.cfgRescale = cfgRescale
+        }
+        if let seed = parameters["seed"] as? Int {
+            next.imageSettings.seed = seed
+        }
+        return next
+    }
+
+    private static func selectedRandomSnippets(_ snippets: [NovelAIPromptSnippet], randomIndex: ((Int) -> Int)?) -> [NovelAIPromptSnippet] {
+        guard !snippets.isEmpty else { return [] }
+        let index = randomIndex?(snippets.count) ?? Int.random(in: 0..<snippets.count)
+        return [snippets[max(0, min(index, snippets.count - 1))]]
     }
 
     private func extractImages(fromZipData data: Data, prompt: String, negativePrompt: String, model: String) throws -> [NovelAIAlbumItem] {
@@ -347,14 +453,14 @@ final class NovelAIClient {
     }
 }
 
-private struct NovelAIRequest: Encodable {
+struct NovelAIRequest: Encodable {
     var action: String
     var input: String
     var model: String
     var parameters: NovelAIParameters
 }
 
-private struct NovelAIParameters: Encodable {
+struct NovelAIParameters: Encodable {
     var width: Int
     var height: Int
     var scale: Double
@@ -370,9 +476,17 @@ private struct NovelAIParameters: Encodable {
     var imageFormat: String
     var prompt: String
     var negativePrompt: String
+    var noiseSchedule: String
+    var seed: Int?
+    var image: String?
+    var strength: Double?
+    var noise: Double?
+    var referenceImageMultiple: [String]
+    var referenceInformationExtractedMultiple: [Double]
+    var referenceStrengthMultiple: [Double]
 
     enum CodingKeys: String, CodingKey {
-        case width, height, scale, sampler, steps, prompt
+        case width, height, scale, sampler, steps, prompt, seed, image, strength, noise
         case nSamples = "n_samples"
         case ucPreset = "ucPreset"
         case qualityToggle = "qualityToggle"
@@ -382,5 +496,9 @@ private struct NovelAIParameters: Encodable {
         case cfgRescale = "cfg_rescale"
         case imageFormat = "image_format"
         case negativePrompt = "negative_prompt"
+        case noiseSchedule = "noise_schedule"
+        case referenceImageMultiple = "reference_image_multiple"
+        case referenceInformationExtractedMultiple = "reference_information_extracted_multiple"
+        case referenceStrengthMultiple = "reference_strength_multiple"
     }
 }

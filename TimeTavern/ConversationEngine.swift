@@ -30,8 +30,8 @@ final class ConversationEngine {
             "使用者稱呼：\(state.userProfile.userName)",
             "角色模式：\(roleCard.mode.title)",
             "目前角色卡：\(roleCard.name)",
-            promptMode.mainRules,
-            promptMode.outputRules,
+            effectiveMainRules(promptMode),
+            effectiveContextRules(promptMode),
             sections,
             lorebookContext,
             compression
@@ -63,9 +63,15 @@ final class ConversationEngine {
                 var nextProfile = profile
                 let shouldTrigger = profile.triggerActions.contains { action in
                     guard action.enabled else { return false }
+                    if action.triggers.everyTurn { return true }
                     if let targetTurn = action.turn, targetTurn == turn { return true }
+                    if action.triggers.turns.contains(turn) { return true }
                     if !action.keywords.isEmpty && keywordExpression(action.keywords, matches: latestUserInput) { return true }
-                    return turn - profile.compressedThroughTurnNumber >= max(1, mode.dialogueContextRounds)
+                    if !action.triggers.keywords.isEmpty && keywordList(action.triggers.keywords, matches: latestUserInput) { return true }
+                    if action.triggers.roundLimit || profile.triggers.roundLimit {
+                        return turn - profile.compressedThroughTurnNumber >= max(1, mode.dialogueContextRounds)
+                    }
+                    return false
                 }
                 guard shouldTrigger else { return nextProfile }
                 if profile.triggerActions.contains(where: { $0.action == .copyUserInput }) {
@@ -90,6 +96,28 @@ final class ConversationEngine {
         return (try? buildPromptMessages(state: previewState, userInput: input)
             .map { "\($0.role.uppercased())\n\($0.content)" }
             .joined(separator: "\n\n---\n\n")) ?? ""
+    }
+
+    func compressionPromptPreview(mode: PromptModeConfig, profile: CompressionProfile) -> String {
+        let context = profile.contextCompression.mainRules.isEmpty ? profile.mainRules : profile.contextCompression.mainRules
+        let models = (profile.contextCompression.models.isEmpty ? profile.models : profile.contextCompression.models)
+            .map { model in
+                """
+                [\(model.id)] \(model.name)
+                add: \(model.addRules)
+                delete: \(model.deleteRules)
+                """
+            }
+            .joined(separator: "\n\n")
+        return [
+            "模式：\(mode.name)",
+            "壓縮 Profile：\(profile.name)",
+            "範圍：\(profile.contextScope.title)",
+            context,
+            models
+        ]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n\n---\n\n")
     }
 
     func branchSession(from state: AppState, name: String) -> SavedSession {
@@ -133,6 +161,22 @@ final class ConversationEngine {
                 }
             }
             .allSatisfy { $0 }
+    }
+
+    private func keywordList(_ keywords: [String], matches text: String) -> Bool {
+        let target = text.lowercased()
+        return keywords.contains { keyword in
+            let normalized = keyword.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return !normalized.isEmpty && target.contains(normalized)
+        }
+    }
+
+    private func effectiveMainRules(_ mode: PromptModeConfig) -> String {
+        mode.reasonerHistoryConfig.mainRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? mode.mainRules : mode.reasonerHistoryConfig.mainRules
+    }
+
+    private func effectiveContextRules(_ mode: PromptModeConfig) -> String {
+        mode.reasonerHistoryConfig.contextRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? mode.outputRules : mode.reasonerHistoryConfig.contextRules
     }
 
     private func replacePlaceholders(_ text: String, user: String, role: String) -> String {

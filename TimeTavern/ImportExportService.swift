@@ -47,7 +47,7 @@ final class ImportExportService {
         }
         let promptFiles = files.filter { $0.key.hasPrefix("prompts/modular/") && $0.key.hasSuffix(".json") }
         bundle.promptModes = promptFiles.compactMap { _, data in
-            try? decoder.decode(WebPromptMode.self, from: data).native
+            try? decoder.decode(PromptModeConfig.self, from: data)
         }
         return bundle
     }
@@ -74,20 +74,115 @@ final class ImportExportService {
     }
 }
 
+struct BundledWebDefaultsSummary: Hashable {
+    var roleCardCount: Int = 0
+    var promptModeCount: Int = 0
+    var userDisplayName: String = ""
+    var activeRoleCardName: String = ""
+}
+
+final class BundledWebDefaultsService {
+    private let bundle: Bundle
+
+    init(bundle: Bundle = .main) {
+        self.bundle = bundle
+    }
+
+    func loadDefaults() throws -> AppState {
+        try Self.loadDefaults(from: defaultsRootURL())
+    }
+
+    func summary() throws -> BundledWebDefaultsSummary {
+        let state = try loadDefaults()
+        return BundledWebDefaultsSummary(
+            roleCardCount: state.roleCards.count,
+            promptModeCount: state.promptModes.count,
+            userDisplayName: state.userProfile.userName,
+            activeRoleCardName: state.activeRoleCard?.name ?? state.roleCards.first?.name ?? ""
+        )
+    }
+
+    static func loadDefaults(from rootURL: URL) throws -> AppState {
+        let decoder = JSONDecoder()
+        var state = AppState()
+        let defaultsURL = rootURL.appendingPathComponent("defaults/app-defaults.json")
+        if FileManager.default.fileExists(atPath: defaultsURL.path) {
+            let data = try Data(contentsOf: defaultsURL)
+            let defaults = try decoder.decode(WebDefaults.self, from: data)
+            if let nativeState = defaults.nativeState {
+                state = nativeState
+            }
+        }
+
+        let modularURL = rootURL.appendingPathComponent("prompts/modular")
+        if let files = try? FileManager.default.contentsOfDirectory(at: modularURL, includingPropertiesForKeys: nil) {
+            let modes = files
+                .filter { $0.pathExtension == "json" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+                .compactMap { url -> PromptModeConfig? in
+                    guard let data = try? Data(contentsOf: url) else { return nil }
+                    return try? decoder.decode(PromptModeConfig.self, from: data)
+                }
+            if !modes.isEmpty {
+                state.promptModes = modes
+            }
+        }
+        return state
+    }
+
+    private func defaultsRootURL() throws -> URL {
+        if let url = bundle.url(forResource: "WebDefaults", withExtension: nil) {
+            return url
+        }
+        if let url = bundle.url(forResource: "Resources/WebDefaults", withExtension: nil) {
+            return url
+        }
+        throw TimeTavernError.invalidImport
+    }
+}
+
 private struct WebDefaults: Decodable {
-    var userProfile: UserProfile?
+    var activeRoleCardId: String?
+    var activeAssistantMode: String?
+    var userProfile: WebUserProfile?
     var roleCards: [WebRoleCard] = []
     var conversationSettings: WebConversationSettings?
-    var contextCompression: WebContextCompression?
+    var timeTracking: WebTimeTracking?
 
     var nativeState: AppState? {
         var state = AppState()
-        if let userProfile { state.userProfile = userProfile }
+        if let userProfile { state.userProfile = userProfile.native }
         state.roleCards = roleCards.map(\.native)
+        if let activeRoleCardId, state.roleCards.contains(where: { $0.id == activeRoleCardId }) {
+            state.activeRoleCardId = activeRoleCardId
+        } else {
+            state.activeRoleCardId = state.roleCards.first?.id ?? ""
+        }
+        state.activeAssistantMode = activeAssistantMode ?? ""
+        if let timeTracking { state.timeTracking = timeTracking.native }
         if let conversationSettings {
             state.apiSettings.deepSeekModel = conversationSettings.chatOutputModel ?? state.apiSettings.deepSeekModel
+            if let rounds = conversationSettings.dialogueContextRounds {
+                state.promptModes = state.promptModes.map { mode in
+                    var next = mode
+                    next.dialogueContextRounds = rounds
+                    return next
+                }
+            }
         }
         return state
+    }
+}
+
+private struct WebUserProfile: Decodable {
+    var displayName: String?
+    var identityText: String?
+
+    var native: UserProfile {
+        UserProfile(
+            userName: displayName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? displayName! : "user",
+            extraPrompt: identityText ?? ""
+        )
     }
 }
 
@@ -103,9 +198,35 @@ private struct WebConversationSettings: Decodable {
     var dialogueContextRounds: Int?
 }
 
-private struct WebContextCompression: Decodable {
-    var summary: String?
-    var compressedThroughTurnNumber: Int?
+private struct WebTimeTracking: Decodable {
+    struct AutoPeriod: Decodable {
+        var enabled: Bool?
+        var roundsPerPeriod: Int?
+    }
+
+    var enabled: Bool?
+    var currentDayNumber: Int?
+    var currentPeriod: String?
+    var autoPeriod: AutoPeriod?
+
+    var native: TimeTrackingConfig {
+        TimeTrackingConfig(
+            enabled: enabled ?? true,
+            day: currentDayNumber ?? 1,
+            period: Self.localizedPeriod(currentPeriod),
+            autoAdvanceRounds: autoPeriod?.roundsPerPeriod ?? 3
+        )
+    }
+
+    private static func localizedPeriod(_ value: String?) -> String {
+        switch value {
+        case "morning": "早上"
+        case "noon": "中午"
+        case "evening": "晚上"
+        case let value?: value
+        case nil: "早上"
+        }
+    }
 }
 
 private struct WebRoleCard: Decodable {
@@ -126,6 +247,7 @@ private struct WebRoleCard: Decodable {
         card.mode = RoleCardMode(rawValue: mode ?? "multi") ?? .custom
         card.promptModeId = card.mode.rawValue
         card.coverImageDataURL = coverImage ?? ""
+        card.coverImageData = Self.decodeDataURL(coverImage)
         card.customSections = customSections ?? []
         if let openingDialogues, !openingDialogues.isEmpty {
             card.openingDialogues = openingDialogues
@@ -135,6 +257,12 @@ private struct WebRoleCard: Decodable {
         card.activeOpeningDialogueId = activeOpeningDialogueId ?? card.openingDialogues.first?.id ?? ""
         card.lorebooks = (lorebooks ?? []).map(\.native)
         return card
+    }
+
+    private static func decodeDataURL(_ dataURL: String?) -> Data? {
+        guard let dataURL, let commaIndex = dataURL.firstIndex(of: ",") else { return nil }
+        let encoded = String(dataURL[dataURL.index(after: commaIndex)...])
+        return Data(base64Encoded: encoded)
     }
 }
 
@@ -197,28 +325,6 @@ private struct WebAILog: Decodable {
             reasoningPreview: (debugReasoningContent ?? "").prefixString(1200),
             error: error ?? "",
             status: status ?? "success"
-        )
-    }
-}
-
-private struct WebPromptMode: Decodable {
-    var mode: String?
-    var name: String?
-    var dialogueContextRounds: Int?
-    var reasonerHistory: String?
-    var compressionProfiles: [CompressionProfile]?
-    var contextCompressionPrompt: String?
-
-    var native: PromptModeConfig {
-        PromptModeConfig(
-            id: mode ?? UUID().uuidString,
-            name: name ?? mode ?? "Prompt",
-            mode: mode ?? "custom",
-            dialogueContextRounds: dialogueContextRounds ?? 15,
-            mainRules: "",
-            outputRules: "",
-            reasonerHistory: reasonerHistory ?? "",
-            compressionProfiles: compressionProfiles ?? [CompressionProfile(mainRules: contextCompressionPrompt ?? "")]
         )
     }
 }

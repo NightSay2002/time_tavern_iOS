@@ -1,0 +1,245 @@
+{
+  "version": 2,
+  "updatedAt": "2026-05-26T13:50:26.478Z",
+  "activeAssistantMode": null,
+  "activeRoleCardId": "card_1777988428775_qk26mr",
+  "userProfile": {
+    "identityText": "[角色沉浸要求]在你的思考过程(<think>标签内)中，请遵守以下规则：\n1.你是正文助手，負責寫正文\n2.你不會是角色，只會是正文助手\n3. user的輸入只代表{{user}},不代表其他角色",
+    "displayName": "時分"
+  },
+  "conversationSettings": {
+    "chatOutputModel": "deepseek-v4-pro",
+    "dialogueContextRounds": 15
+  },
+  "timeTracking": {
+    "enabled": false,
+    "currentDayNumber": 1,
+    "currentPeriod": "morning",
+    "currentYear": 2026,
+    "currentMonth": 3,
+    "currentDate": 13,
+    "autoPeriod": {
+      "enabled": true,
+      "roundsPerPeriod": 5,
+      "turnsSinceChange": 0
+    },
+    "config": {
+      "nextDayWords": [
+        "下一天",
+        "第二天",
+        "隔天"
+      ],
+      "connectorWords": [
+        "來到",
+        "来到",
+        "已經",
+        "已经",
+        "現在",
+        "现在",
+        "到了",
+        "變成",
+        "变成",
+        "已是",
+        "快進"
+      ],
+      "noChangeWords": [
+        "等到",
+        "等一下",
+        "的時候",
+        "的时候",
+        "明天"
+      ],
+      "morningWords": [
+        "早上",
+        "早晨",
+        "清晨",
+        "早餐",
+        "早飯",
+        "早饭",
+        "上午",
+        "天亮"
+      ],
+      "noonWords": [
+        "中午",
+        "下午",
+        "午餐",
+        "午飯",
+        "午饭",
+        "正午"
+      ],
+      "eveningWords": [
+        "晚上",
+        "夜晚",
+        "晚餐",
+        "晚飯",
+        "晚饭",
+        "傍晚",
+        "深夜",
+        "夜裡",
+        "夜里"
+      ]
+    },
+    "updatedAt": "2026-05-25T16:27:52.880Z"
+  },
+  "contextCompression": {
+    "enabled": true,
+    "summary": "",
+    "compressedThroughTurnNumber": 0,
+    "profiles": {}
+  },
+  "roleCards": [
+    {
+      "id": "card_1774797442665_uo8e3e",
+      "name": "公共〇玩具",
+      "mode": "no_role",
+      "promptModeId": "no_role",
+      "customSections": [],
+      "openingDialogue": "",
+      "openingDialogues": [
+        {
+          "id": "card_1774797442665_uo8e3e_opening_default",
+          "name": "開場",
+          "content": ""
+        }
+      ],
+      "activeOpeningDialogueId": "card_1774797442665_uo8e3e_opening_default",
+      "lorebooks": []
+    },
+    {
+      "id": "card_1774977649216_763fnr",
+      "name": "全员榨〇世界",
+      "mode": "no_role",
+      "promptModeId": "no_role",
+      "customSections": [],
+      "openingDialogue": "",
+      "openingDialogues": [
+        {
+          "id": "card_1774977649216_763fnr_opening_default",
+          "name": "開場",
+          "content": ""
+        }
+      ],
+      "activeOpeningDialogueId": "card_1774977649216_763fnr_opening_default",
+      "lorebooks": []
+    },
+    {
+      "id": "card_1775093482057_opkq5k",
+      "name": "雙人回合制",
+      "mode": "multi",
+      "promptModeId": "multi",
+      "customSections": [],
+      "openingDialogue": "",
+      "openingDialogues": [
+        {
+          "id": "card_1775093482057_opkq5k_opening_default",
+          "name": "開場",
+          "content": ""
+        }
+      ],
+      "activeOpeningDialogueId": "card_1775093482057_opkq5k_opening_default",
+      "lorebooks": []
+    },
+    {
+      "id": "card_1775280108014_1epnw4",
+      "name": "全員女同性戀的輕鬆修仙大世界",
+      "mode": "no_role",
+      "promptModeId": "no_role",
+      "customSections": [],
+      "openingDialogue": "",
+      "openingDialogues": [
+        {
+          "id": "card_1775280108014_1epnw4_opening_default",
+          "name": "開場",
+          "content": ""
+        }
+      ],
+      "activeOpeningDialogueId": "card_1775280108014_1epnw4_opening_default",
+      "lorebooks": []
+    },
+    {
+      "id": "card_1777127565763_laylq9",
+      "name": "狠狠欺負你的三位美少女",
+      "mode": "multi",
+      "promptModeId": "multi",
+      "customSections": [],
+      "openingDialogue": "",
+      "openingDialogues": [
+        {
+          "id": "card_1777127565763_laylq9_opening_default",
+          "name": "開場",
+          "content": ""
+        }
+      ],
+      "activeOpeningDialogueId": "card_1777127565763_laylq9_opening_default",
+      "lorebooks": []
+    },
+    {
+      "id": "card_1777816182452_q7c6j0",
+      "name": "新伊甸計畫",
+      "mode": "no_role",
+      "promptModeId": "no_role",
+      "customSections": [],
+      "openingDialogue": "",
+      "openingDialogues": [
+        {
+          "id": "card_1777816182452_q7c6j0_opening_default",
+          "name": "開場",
+          "content": ""
+        }
+      ],
+      "activeOpeningDialogueId": "card_1777816182452_q7c6j0_opening_default",
+      "lorebooks": []
+    },
+    {
+      "id": "card_1777988428775_qk26mr",
+      "name": "一醒來就變成爐鼎！？",
+      "mode": "multi",
+      "promptModeId": "multi",
+      "customSections": [],
+      "openingDialogue": "",
+      "openingDialogues": [
+        {
+          "id": "card_1777988428775_qk26mr_opening_default",
+          "name": "開場",
+          "content": ""
+        }
+      ],
+      "activeOpeningDialogueId": "card_1777988428775_qk26mr_opening_default",
+      "lorebooks": []
+    },
+    {
+      "id": "card_1777993274183_t2sjg5",
+      "name": "〇愛卡牌對決",
+      "mode": "no_role",
+      "promptModeId": "no_role",
+      "customSections": [],
+      "openingDialogue": "",
+      "openingDialogues": [
+        {
+          "id": "card_1777993274183_t2sjg5_opening_default",
+          "name": "開場",
+          "content": ""
+        }
+      ],
+      "activeOpeningDialogueId": "card_1777993274183_t2sjg5_opening_default",
+      "lorebooks": []
+    },
+    {
+      "id": "card_1779070992560_zext0i",
+      "name": "魔法少女",
+      "mode": "no_role",
+      "promptModeId": "no_role",
+      "customSections": [],
+      "openingDialogue": "",
+      "openingDialogues": [
+        {
+          "id": "card_1779070992560_zext0i_opening_default",
+          "name": "開場",
+          "content": ""
+        }
+      ],
+      "activeOpeningDialogueId": "card_1779070992560_zext0i_opening_default",
+      "lorebooks": []
+    }
+  ]
+}
