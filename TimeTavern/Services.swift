@@ -14,6 +14,11 @@ struct ChatCompletionResult: Hashable {
     var model: String
 }
 
+struct NovelAIMetadataImportResult: Hashable {
+    var settings: NovelAIStudioSettings
+    var fallbackMessage: String?
+}
+
 final class SecretStore {
     enum Key: String {
         case deepSeekAPIKey
@@ -268,7 +273,7 @@ final class NovelAIClient {
         var studioSettings = NovelAIStudioSettings()
         studioSettings.basePrompt = prompt
         studioSettings.negativePrompt = negativePrompt
-        studioSettings.imageSettings.model = model
+        studioSettings.imageSettings.model = NovelAIModelOption.knownIDOrDefault(model)
         studioSettings.imageSettings.width = width
         studioSettings.imageSettings.height = height
         studioSettings.imageSettings.steps = steps
@@ -301,7 +306,7 @@ final class NovelAIClient {
                 fromZipData: data,
                 prompt: prompt,
                 negativePrompt: studioSettings.negativePrompt,
-                model: studioSettings.imageSettings.model
+                model: payload.model
             ))
         }
         return results
@@ -328,12 +333,13 @@ final class NovelAIClient {
     static func buildImageGenerationRequest(studioSettings: NovelAIStudioSettings, prompt: String? = nil) -> NovelAIRequest {
         let imageSettings = studioSettings.imageSettings
         let resolvedPrompt = prompt ?? resolvedPrompt(from: studioSettings)
+        let model = NovelAIModelOption.knownIDOrDefault(imageSettings.model)
         let references = studioSettings.vibeTransferImages.filter { $0.enabled && $0.imageData != nil }
         let preciseReferences = studioSettings.preciseReferenceImages.filter { $0.enabled && $0.imageData != nil }
         return NovelAIRequest(
             action: "generate",
             input: resolvedPrompt,
-            model: imageSettings.model,
+            model: model,
             parameters: NovelAIParameters(
                 width: imageSettings.width,
                 height: imageSettings.height,
@@ -362,16 +368,22 @@ final class NovelAIClient {
         )
     }
 
-    static func settingsByImportingMetadata(_ metadata: String, into settings: NovelAIStudioSettings) -> NovelAIStudioSettings {
+    static func importMetadata(_ metadata: String, into settings: NovelAIStudioSettings) -> NovelAIMetadataImportResult {
         guard let data = metadata.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return settings }
+        else { return NovelAIMetadataImportResult(settings: settings, fallbackMessage: nil) }
         var next = settings
+        var fallbackMessage: String?
         if let input = object["input"] as? String {
             next.basePrompt = input
         }
         if let model = object["model"] as? String {
-            next.imageSettings.model = model
+            if NovelAIModelOption.option(for: model) == nil {
+                next.imageSettings.model = NovelAIModelOption.defaultID
+                fallbackMessage = "Metadata 模型 \(model) 不在 iOS 選項內，已改用 \(NovelAIModelOption.title(for: NovelAIModelOption.defaultID))。"
+            } else {
+                next.imageSettings.model = model
+            }
         }
         let parameters = object["parameters"] as? [String: Any] ?? object
         if let negative = parameters["negative_prompt"] as? String {
@@ -398,7 +410,11 @@ final class NovelAIClient {
         if let seed = parameters["seed"] as? Int {
             next.imageSettings.seed = seed
         }
-        return next
+        return NovelAIMetadataImportResult(settings: next, fallbackMessage: fallbackMessage)
+    }
+
+    static func settingsByImportingMetadata(_ metadata: String, into settings: NovelAIStudioSettings) -> NovelAIStudioSettings {
+        importMetadata(metadata, into: settings).settings
     }
 
     private static func selectedRandomSnippets(_ snippets: [NovelAIPromptSnippet], randomIndex: ((Int) -> Int)?) -> [NovelAIPromptSnippet] {

@@ -1,12 +1,4 @@
 import Foundation
-import ZIPFoundation
-
-struct ImportedBundle {
-    var roleCards: [RoleCard] = []
-    var promptModes: [PromptModeConfig] = []
-    var statePatch: AppState?
-    var rawFiles: [String: Data] = [:]
-}
 
 final class ImportExportService {
     private let decoder = JSONDecoder()
@@ -16,61 +8,311 @@ final class ImportExportService {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     }
 
-    func importBundle(from url: URL) throws -> ImportedBundle {
-        let archive = try Archive(url: url, accessMode: .read, pathEncoding: nil)
-        var files: [String: Data] = [:]
-        for entry in archive {
-            guard entry.type == .file else { continue }
-            var data = Data()
-            _ = try archive.extract(entry) { chunk in
-                data.append(chunk)
-            }
-            files[entry.path] = data
-        }
-
-        var bundle = ImportedBundle(rawFiles: files)
-        if let defaultsData = find(files, named: "defaults/app-defaults.json"),
-           let defaults = try? decoder.decode(WebDefaults.self, from: defaultsData) {
-            bundle.roleCards = defaults.roleCards.map(\.native)
-            if let state = defaults.nativeState {
-                bundle.statePatch = state
-            }
-        }
-        if let appStateData = find(files, named: "data/app-state.json"),
-           let state = try? decoder.decode(WebAppState.self, from: appStateData) {
-            var patch = bundle.statePatch ?? AppState()
-            if !state.roleCards.isEmpty { patch.roleCards = state.roleCards.map(\.native) }
-            patch.activeRoleCardId = state.activeRoleCardId ?? patch.activeRoleCardId
-            patch.conversation = state.conversation.map(\.native)
-            patch.aiLogs = state.aiLogs.map(\.native)
-            bundle.statePatch = patch
-        }
-        let promptFiles = files.filter { $0.key.hasPrefix("prompts/modular/") && $0.key.hasSuffix(".json") }
-        bundle.promptModes = promptFiles.compactMap { _, data in
-            try? decoder.decode(PromptModeConfig.self, from: data)
-        }
-        return bundle
+    func importRoleCardJSON(from url: URL, existingRoleCards: [RoleCard]) throws -> RoleCard {
+        try importRoleCardJSON(from: try Data(contentsOf: url), existingRoleCards: existingRoleCards)
     }
 
-    func exportBundle(state: AppState) throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("TimeTavern-iOS-\(Int(Date().timeIntervalSince1970)).zip")
-        try? FileManager.default.removeItem(at: url)
-        let archive = try Archive(url: url, accessMode: .create, pathEncoding: nil)
-        let stateData = try encoder.encode(state)
-        try archive.addEntry(with: "time-tavern-ios/state.json", type: .file, uncompressedSize: Int64(stateData.count)) { position, size in
-            stateData.subdata(in: Int(position)..<Int(position) + size)
+    func importRoleCardJSON(from data: Data, existingRoleCards: [RoleCard]) throws -> RoleCard {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw TimeTavernError.invalidImport
         }
-        for mode in state.promptModes {
-            let data = try encoder.encode(mode)
-            try archive.addEntry(with: "time-tavern-ios/prompts/\(mode.id).json", type: .file, uncompressedSize: Int64(data.count)) { position, size in
-                data.subdata(in: Int(position)..<Int(position) + size)
-            }
+        let decoded: RoleCard
+        if object["roleCard"] != nil || object["timeTavernRoleCard"] != nil {
+            decoded = try decoder.decode(TimeTavernRoleCardFile.self, from: data).roleCard
+        } else if object["spec"] != nil || object["data"] != nil {
+            decoded = try decoder.decode(SillyTavernCardFile.self, from: data).native
+        } else if object.keys.contains(where: Self.isRoleCardKey) {
+            decoded = try decoder.decode(WebRoleCard.self, from: data).native
+        } else {
+            throw TimeTavernError.invalidImport
         }
+        return uniqueRoleCard(decoded, existing: existingRoleCards)
+    }
+
+    func importPromptModeJSON(from url: URL, existingModes: [PromptModeConfig]) throws -> PromptModeConfig {
+        try importPromptModeJSON(from: try Data(contentsOf: url), existingModes: existingModes)
+    }
+
+    func importPromptModeJSON(from data: Data, existingModes: [PromptModeConfig]) throws -> PromptModeConfig {
+        let mode = try decoder.decode(PromptModeConfig.self, from: data)
+        return uniquePromptMode(mode, existing: existingModes)
+    }
+
+    func importCompressionProfileJSON(from url: URL, existingProfiles: [CompressionProfile]) throws -> CompressionProfile {
+        try importCompressionProfileJSON(from: try Data(contentsOf: url), existingProfiles: existingProfiles)
+    }
+
+    func importCompressionProfileJSON(from data: Data, existingProfiles: [CompressionProfile]) throws -> CompressionProfile {
+        let profile = try decoder.decode(CompressionProfile.self, from: data)
+        return uniqueCompressionProfile(profile, existing: existingProfiles)
+    }
+
+    func exportRoleCardJSON(_ card: RoleCard) throws -> URL {
+        try writeJSON(TimeTavernRoleCardFile(roleCard: card), fileName: "role-card-\(safeFileName(card.name)).json")
+    }
+
+    func exportPromptModeJSON(_ mode: PromptModeConfig) throws -> URL {
+        try writeJSON(mode, fileName: "prompt-mode-\(safeFileName(mode.name)).json")
+    }
+
+    func exportCompressionProfileJSON(_ profile: CompressionProfile) throws -> URL {
+        try writeJSON(profile, fileName: "compression-profile-\(safeFileName(profile.name)).json")
+    }
+
+    private func writeJSON<T: Encodable>(_ value: T, fileName: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(Int(Date().timeIntervalSince1970))-\(fileName)")
+        try encoder.encode(value).write(to: url, options: .atomic)
         return url
     }
 
-    private func find(_ files: [String: Data], named name: String) -> Data? {
-        files[name] ?? files.first { $0.key.hasSuffix(name) }?.value
+    private static func isRoleCardKey(_ key: String) -> Bool {
+        [
+            "id", "name", "mode", "promptModeId", "coverImage", "coverImageDataURL",
+            "coverImageData", "coverPosition", "customSections", "openingDialogue",
+            "openingDialogues", "lorebooks"
+        ].contains(key)
+    }
+
+    private func uniqueRoleCard(_ card: RoleCard, existing: [RoleCard]) -> RoleCard {
+        var next = normalizedRoleCard(card)
+        if next.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            next.name = "未命名角色"
+        }
+        let idConflict = existing.contains { $0.id == next.id }
+        let nameConflict = existing.contains { $0.name == next.name }
+        if idConflict || nameConflict {
+            next.id = UUID().uuidString
+            next.name = uniqueName(next.name, existingNames: existing.map(\.name))
+            next.createdAt = Date()
+            next.updatedAt = Date()
+        }
+        return next
+    }
+
+    private func uniquePromptMode(_ mode: PromptModeConfig, existing: [PromptModeConfig]) -> PromptModeConfig {
+        var next = mode
+        let idConflict = existing.contains { $0.id == next.id }
+        let nameConflict = existing.contains { $0.name == next.name }
+        if idConflict || nameConflict {
+            let baseID = next.id.isEmpty ? "custom" : next.id
+            next.id = "\(baseID)_copy_\(UUID().uuidString.prefix(8))"
+            next.mode = next.mode.isEmpty || existing.contains(where: { $0.mode == next.mode }) ? next.id : next.mode
+            next.name = uniqueName(next.name.isEmpty ? "自訂模式" : next.name, existingNames: existing.map(\.name))
+        }
+        return next
+    }
+
+    private func uniqueCompressionProfile(_ profile: CompressionProfile, existing: [CompressionProfile]) -> CompressionProfile {
+        var next = profile
+        let idConflict = existing.contains { $0.id == next.id }
+        let nameConflict = existing.contains { $0.name == next.name }
+        if idConflict || nameConflict {
+            let baseID = next.id.isEmpty ? "compression_profile" : next.id
+            next.id = "\(baseID)_copy_\(UUID().uuidString.prefix(8))"
+            next.name = uniqueName(next.name.isEmpty ? "自訂壓縮" : next.name, existingNames: existing.map(\.name))
+            next.locked = false
+        }
+        return next
+    }
+
+    private func uniqueName(_ name: String, existingNames: [String]) -> String {
+        let base = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "副本" : name
+        var candidate = "\(base) 副本"
+        var index = 2
+        while existingNames.contains(candidate) {
+            candidate = "\(base) 副本 \(index)"
+            index += 1
+        }
+        return candidate
+    }
+
+    private func safeFileName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = trimmed.isEmpty ? "untitled" : trimmed
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        return base.unicodeScalars
+            .map { allowed.contains($0) ? String($0) : "-" }
+            .joined()
+    }
+
+    private func normalizedRoleCard(_ card: RoleCard) -> RoleCard {
+        var next = card
+        if next.openingDialogues.isEmpty {
+            next.openingDialogues = [OpeningDialogue()]
+        }
+        if !next.openingDialogues.contains(where: { $0.id == next.activeOpeningDialogueId }) {
+            next.activeOpeningDialogueId = next.openingDialogues.first?.id ?? ""
+        }
+        next.coverPosition = RoleCardCoverPosition(rawValue: next.coverPosition)?.rawValue ?? RoleCardCoverPosition.centerCenter.rawValue
+        return next
+    }
+}
+
+struct TimeTavernRoleCardFile: Codable {
+    var format: String = "time_tavern_role_card"
+    var version: Int = 1
+    var roleCard: RoleCard
+
+    enum CodingKeys: String, CodingKey {
+        case format, version, roleCard
+        case timeTavernRoleCard
+    }
+
+    init(roleCard: RoleCard) {
+        self.roleCard = roleCard
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(format, forKey: .format)
+        try container.encode(version, forKey: .version)
+        try container.encode(roleCard, forKey: .roleCard)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        format = try container.decodeIfPresent(String.self, forKey: .format) ?? "time_tavern_role_card"
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        if let roleCard = try container.decodeIfPresent(RoleCard.self, forKey: .roleCard) {
+            self.roleCard = roleCard
+        } else if let roleCard = try container.decodeIfPresent(RoleCard.self, forKey: .timeTavernRoleCard) {
+            self.roleCard = roleCard
+        } else {
+            throw TimeTavernError.invalidImport
+        }
+    }
+}
+
+private struct SillyTavernCardFile: Decodable {
+    var spec: String?
+    var data: SillyTavernCardData
+
+    var native: RoleCard {
+        data.native
+    }
+}
+
+private struct SillyTavernCardData: Decodable {
+    var name: String?
+    var description: String?
+    var personality: String?
+    var scenario: String?
+    var firstMes: String?
+    var alternateGreetings: [String]?
+    var mesExample: String?
+    var systemPrompt: String?
+    var postHistoryInstructions: String?
+    var avatar: String?
+    var characterBook: SillyTavernCharacterBook?
+
+    enum CodingKeys: String, CodingKey {
+        case name, description, personality, scenario, avatar
+        case firstMes = "first_mes"
+        case alternateGreetings = "alternate_greetings"
+        case mesExample = "mes_example"
+        case systemPrompt = "system_prompt"
+        case postHistoryInstructions = "post_history_instructions"
+        case characterBook = "character_book"
+    }
+
+    var native: RoleCard {
+        var sections: [CustomSection] = []
+        appendSection("描述", description, to: &sections)
+        appendSection("性格", personality, to: &sections)
+        appendSection("場景", scenario, to: &sections)
+        appendSection("System Prompt", systemPrompt, to: &sections)
+        appendSection("Post History", postHistoryInstructions, to: &sections)
+        appendSection("範例對話", mesExample, to: &sections)
+
+        let openings = ([firstMes] + (alternateGreetings ?? []).map(Optional.some))
+            .compactMap { value -> String? in
+                let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            .enumerated()
+            .map { index, content in
+                OpeningDialogue(name: index == 0 ? "開場" : "替代開場 \(index)", content: content)
+            }
+
+        var card = RoleCard()
+        card.name = name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? name! : "未命名角色"
+        card.mode = .multi
+        card.promptModeId = RoleCardMode.multi.rawValue
+        card.coverImageDataURL = avatar ?? ""
+        card.coverImageData = Self.decodeDataURL(avatar)
+        card.coverPosition = RoleCardCoverPosition.centerCenter.rawValue
+        card.customSections = sections
+        card.openingDialogues = openings.isEmpty ? [OpeningDialogue()] : openings
+        card.activeOpeningDialogueId = card.openingDialogues.first?.id ?? ""
+        card.lorebooks = characterBook?.entries.map(\.native) ?? []
+        return card
+    }
+
+    private func appendSection(_ name: String, _ content: String?, to sections: inout [CustomSection]) {
+        let trimmed = (content ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        sections.append(CustomSection(name: name, content: trimmed))
+    }
+
+    private static func decodeDataURL(_ dataURL: String?) -> Data? {
+        guard let dataURL, let commaIndex = dataURL.firstIndex(of: ",") else { return nil }
+        let encoded = String(dataURL[dataURL.index(after: commaIndex)...])
+        return Data(base64Encoded: encoded)
+    }
+}
+
+private struct SillyTavernCharacterBook: Decodable {
+    var entries: [SillyTavernBookEntry] = []
+
+    enum CodingKeys: String, CodingKey {
+        case entries
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let entries = try? container.decode([SillyTavernBookEntry].self, forKey: .entries) {
+            self.entries = entries
+        } else {
+            self.entries = []
+        }
+    }
+}
+
+private struct SillyTavernBookEntry: Decodable {
+    var id: String?
+    var name: String?
+    var comment: String?
+    var content: String?
+    var keys: [String]?
+    var enabled: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, comment, content, keys, enabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let intID = try? container.decode(Int.self, forKey: .id) {
+            id = String(intID)
+        } else {
+            id = try container.decodeIfPresent(String.self, forKey: .id)
+        }
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        comment = try container.decodeIfPresent(String.self, forKey: .comment)
+        content = try container.decodeIfPresent(String.self, forKey: .content)
+        keys = try container.decodeIfPresent([String].self, forKey: .keys) ?? []
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+    }
+
+    var native: LorebookEntry {
+        LorebookEntry(
+            id: id ?? UUID().uuidString,
+            title: name ?? comment ?? "世界書",
+            keywords: keys ?? [],
+            content: content ?? "",
+            enabled: enabled ?? true
+        )
     }
 }
 
@@ -233,7 +475,11 @@ private struct WebRoleCard: Decodable {
     var id: String?
     var name: String?
     var mode: String?
+    var promptModeId: String?
     var coverImage: String?
+    var coverImageDataURL: String?
+    var coverImageData: Data?
+    var coverPosition: String?
     var customSections: [CustomSection]?
     var openingDialogue: String?
     var openingDialogues: [OpeningDialogue]?
@@ -245,9 +491,11 @@ private struct WebRoleCard: Decodable {
         card.id = id ?? UUID().uuidString
         card.name = name ?? "未命名角色"
         card.mode = RoleCardMode(rawValue: mode ?? "multi") ?? .custom
-        card.promptModeId = card.mode.rawValue
-        card.coverImageDataURL = coverImage ?? ""
-        card.coverImageData = Self.decodeDataURL(coverImage)
+        card.promptModeId = promptModeId ?? card.mode.rawValue
+        let imageURL = coverImage ?? coverImageDataURL ?? ""
+        card.coverImageDataURL = imageURL
+        card.coverImageData = coverImageData ?? Self.decodeDataURL(imageURL)
+        card.coverPosition = RoleCardCoverPosition(rawValue: coverPosition ?? "")?.rawValue ?? RoleCardCoverPosition.centerCenter.rawValue
         card.customSections = customSections ?? []
         if let openingDialogues, !openingDialogues.isEmpty {
             card.openingDialogues = openingDialogues

@@ -9,7 +9,7 @@ final class TimeTavernStore: ObservableObject {
     @Published var composerText = ""
     @Published var statusText = ""
     @Published var isGenerating = false
-    @Published var exportedBundleURL: URL?
+    @Published var exportedJSONURL: URL?
 
     private let secretStore = SecretStore()
     private let deepSeekClient = DeepSeekClient()
@@ -207,30 +207,69 @@ final class TimeTavernStore: ObservableObject {
         persist()
     }
 
-    func importBundle(url: URL) {
+    func importRoleCardJSON(url: URL) {
         do {
-            let bundle = try importExportService.importBundle(from: url)
-            if let patch = bundle.statePatch {
-                if !patch.roleCards.isEmpty { state.roleCards = patch.roleCards }
-                if !patch.conversation.isEmpty { state.conversation = patch.conversation }
-                if !patch.aiLogs.isEmpty { state.aiLogs = patch.aiLogs }
-                if !patch.activeRoleCardId.isEmpty { state.activeRoleCardId = patch.activeRoleCardId }
-            }
-            if !bundle.roleCards.isEmpty { state.roleCards = bundle.roleCards }
-            if !bundle.promptModes.isEmpty { state.promptModes = bundle.promptModes }
-            statusText = "已匯入 \(bundle.rawFiles.count) 個檔案。"
+            let card = try importExportService.importRoleCardJSON(from: url, existingRoleCards: state.roleCards)
+            state.roleCards.insert(card, at: 0)
+            statusText = "已匯入角色卡：\(card.name)"
             persist()
         } catch {
-            statusText = "匯入失敗：\(error.localizedDescription)"
+            statusText = "匯入角色卡失敗：\(error.localizedDescription)"
         }
     }
 
-    func exportBundle() {
+    func importPromptModeJSON(url: URL) {
         do {
-            exportedBundleURL = try importExportService.exportBundle(state: state)
-            statusText = "已建立匯出 ZIP。"
+            let mode = try importExportService.importPromptModeJSON(from: url, existingModes: state.promptModes)
+            state.promptModes.append(mode)
+            statusText = "已匯入模式：\(mode.name)"
+            persist()
         } catch {
-            statusText = "匯出失敗：\(error.localizedDescription)"
+            statusText = "匯入模式失敗：\(error.localizedDescription)"
+        }
+    }
+
+    func importCompressionProfileJSON(url: URL, modeID: String) {
+        do {
+            guard let index = state.promptModes.firstIndex(where: { $0.id == modeID }) else {
+                throw TimeTavernError.invalidImport
+            }
+            let profile = try importExportService.importCompressionProfileJSON(
+                from: url,
+                existingProfiles: state.promptModes[index].compressionProfiles
+            )
+            state.promptModes[index].compressionProfiles.append(profile)
+            statusText = "已匯入大模型：\(profile.name)"
+            persist()
+        } catch {
+            statusText = "匯入大模型失敗：\(error.localizedDescription)"
+        }
+    }
+
+    func exportRoleCardJSON(_ card: RoleCard) {
+        do {
+            exportedJSONURL = try importExportService.exportRoleCardJSON(card)
+            statusText = "已建立角色卡 JSON。"
+        } catch {
+            statusText = "匯出角色卡失敗：\(error.localizedDescription)"
+        }
+    }
+
+    func exportPromptModeJSON(_ mode: PromptModeConfig) {
+        do {
+            exportedJSONURL = try importExportService.exportPromptModeJSON(mode)
+            statusText = "已建立模式 JSON。"
+        } catch {
+            statusText = "匯出模式失敗：\(error.localizedDescription)"
+        }
+    }
+
+    func exportCompressionProfileJSON(_ profile: CompressionProfile) {
+        do {
+            exportedJSONURL = try importExportService.exportCompressionProfileJSON(profile)
+            statusText = "已建立大模型 JSON。"
+        } catch {
+            statusText = "匯出大模型失敗：\(error.localizedDescription)"
         }
     }
 
@@ -238,38 +277,64 @@ final class TimeTavernStore: ObservableObject {
         try? bundledWebDefaultsService.summary()
     }
 
-    func restoreBundledWebDefaults() {
+    func saveCurrentAsLocalDefaults() {
+        state.localDefaults = AppDefaultsSnapshot(state: state)
+        statusText = "已保存目前角色卡、模式、使用者、時間、API 與 NovelAI 設定為本機預設。"
+        persist()
+    }
+
+    func restoreDefaultsPreferLocal() {
         do {
-            let restored = try bundledWebDefaultsService.loadDefaults()
-            let backup = conversationEngine.branchSession(from: state, name: "還原網頁預設前備份")
+            let localDefaults = state.localDefaults
+            let restored: AppState
+            if let localDefaults {
+                restored = Self.appState(from: localDefaults)
+            } else {
+                restored = try bundledWebDefaultsService.loadDefaults()
+            }
+            let backup = conversationEngine.branchSession(from: state, name: "還原預設前備份")
             let preservedSessions = state.savedSessions
             let preservedAlbum = state.novelAIAlbum
             let preservedLogs = state.aiLogs
-            let preservedAPISettings = state.apiSettings
-            let preservedStudioSettings = state.novelAIStudioSettings
 
             var next = state
             next.roleCards = restored.roleCards
             next.promptModes = restored.promptModes
             next.userProfile = restored.userProfile
             next.timeTracking = restored.timeTracking
+            next.apiSettings = restored.apiSettings
+            next.novelAIStudioSettings = restored.novelAIStudioSettings
             next.activeRoleCardId = restored.activeRoleCardId
             next.activeAssistantMode = restored.activeAssistantMode
             next.conversation = []
             next.savedSessions = [backup] + preservedSessions
             next.novelAIAlbum = preservedAlbum
             next.aiLogs = preservedLogs
-            next.novelAIStudioSettings = preservedStudioSettings
-            next.apiSettings = preservedAPISettings
-            if !restored.apiSettings.deepSeekModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                next.apiSettings.deepSeekModel = restored.apiSettings.deepSeekModel
-            }
+            next.localDefaults = localDefaults
             state = next
-            statusText = "已還原網頁預設：\(restored.roleCards.count) 張角色卡、\(restored.promptModes.count) 個 Prompt 模式。"
+            let source = localDefaults == nil ? "網頁 bundle 預設" : "本機預設"
+            statusText = "已還原\(source)：\(restored.roleCards.count) 張角色卡、\(restored.promptModes.count) 個 Prompt 模式。"
             persist()
         } catch {
-            statusText = "還原網頁預設失敗：\(error.localizedDescription)"
+            statusText = "還原預設失敗：\(error.localizedDescription)"
         }
+    }
+
+    func restoreBundledWebDefaults() {
+        restoreDefaultsPreferLocal()
+    }
+
+    private static func appState(from snapshot: AppDefaultsSnapshot) -> AppState {
+        var state = AppState()
+        state.userProfile = snapshot.userProfile
+        state.apiSettings = snapshot.apiSettings
+        state.roleCards = snapshot.roleCards
+        state.activeRoleCardId = snapshot.activeRoleCardId
+        state.activeAssistantMode = snapshot.activeAssistantMode
+        state.promptModes = snapshot.promptModes
+        state.timeTracking = snapshot.timeTracking
+        state.novelAIStudioSettings = snapshot.novelAIStudioSettings
+        return state
     }
 
     func testDeepSeek() {
@@ -298,7 +363,7 @@ final class TimeTavernStore: ObservableObject {
         var studioSettings = state.novelAIStudioSettings
         studioSettings.basePrompt = prompt
         studioSettings.negativePrompt = negativePrompt
-        studioSettings.imageSettings.model = model
+        studioSettings.imageSettings.model = NovelAIModelOption.knownIDOrDefault(model)
         studioSettings.imageSettings.width = width
         studioSettings.imageSettings.height = height
         studioSettings.imageSettings.steps = steps

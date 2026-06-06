@@ -27,6 +27,34 @@ enum RoleCardMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum RoleCardCoverPosition: String, Codable, CaseIterable, Identifiable {
+    case topLeft = "top left"
+    case topCenter = "top center"
+    case topRight = "top right"
+    case centerLeft = "center left"
+    case centerCenter = "center center"
+    case centerRight = "center right"
+    case bottomLeft = "bottom left"
+    case bottomCenter = "bottom center"
+    case bottomRight = "bottom right"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .topLeft: "左上"
+        case .topCenter: "上方"
+        case .topRight: "右上"
+        case .centerLeft: "左側"
+        case .centerCenter: "中央"
+        case .centerRight: "右側"
+        case .bottomLeft: "左下"
+        case .bottomCenter: "下方"
+        case .bottomRight: "右下"
+        }
+    }
+}
+
 enum CompressionTriggerActionKind: String, Codable, CaseIterable, Identifiable {
     case callAPI = "call_api"
     case copyUserInput = "copy_user_input"
@@ -122,12 +150,40 @@ struct CustomSection: Codable, Identifiable, Hashable {
     var name: String = ""
     var content: String = ""
     var enabled: Bool = true
+
+    init(id: String = UUID().uuidString, name: String = "", content: String = "", enabled: Bool = true) {
+        self.id = id
+        self.name = name
+        self.content = content
+        self.enabled = enabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+    }
 }
 
 struct OpeningDialogue: Codable, Identifiable, Hashable {
     var id: String = UUID().uuidString
     var name: String = "開場"
     var content: String = ""
+
+    init(id: String = UUID().uuidString, name: String = "開場", content: String = "") {
+        self.id = id
+        self.name = name
+        self.content = content
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? "開場"
+        content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
+    }
 }
 
 struct LorebookEntry: Codable, Identifiable, Hashable {
@@ -137,6 +193,32 @@ struct LorebookEntry: Codable, Identifiable, Hashable {
     var content: String = ""
     var enabled: Bool = true
     var insertedTurnNumbers: [Int] = []
+
+    init(
+        id: String = UUID().uuidString,
+        title: String = "",
+        keywords: [String] = [],
+        content: String = "",
+        enabled: Bool = true,
+        insertedTurnNumbers: [Int] = []
+    ) {
+        self.id = id
+        self.title = title
+        self.keywords = keywords
+        self.content = content
+        self.enabled = enabled
+        self.insertedTurnNumbers = insertedTurnNumbers
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        title = try container.decodeIfPresent(String.self, forKey: .title) ?? ""
+        keywords = try container.decodeIfPresent([String].self, forKey: .keywords) ?? []
+        content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        insertedTurnNumbers = try container.decodeIfPresent([Int].self, forKey: .insertedTurnNumbers) ?? []
+    }
 }
 
 struct RoleCard: Codable, Identifiable, Hashable {
@@ -146,6 +228,7 @@ struct RoleCard: Codable, Identifiable, Hashable {
     var promptModeId: String = "multi"
     var coverImageData: Data?
     var coverImageDataURL: String = ""
+    var coverPosition: String = RoleCardCoverPosition.centerCenter.rawValue
     var customSections: [CustomSection] = []
     var openingDialogues: [OpeningDialogue] = [OpeningDialogue()]
     var activeOpeningDialogueId: String = ""
@@ -153,8 +236,117 @@ struct RoleCard: Codable, Identifiable, Hashable {
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
 
+    init(
+        id: String = UUID().uuidString,
+        name: String = "",
+        mode: RoleCardMode = .multi,
+        promptModeId: String = "multi",
+        coverImageData: Data? = nil,
+        coverImageDataURL: String = "",
+        coverPosition: String = RoleCardCoverPosition.centerCenter.rawValue,
+        customSections: [CustomSection] = [],
+        openingDialogues: [OpeningDialogue] = [OpeningDialogue()],
+        activeOpeningDialogueId: String = "",
+        lorebooks: [LorebookEntry] = [],
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.mode = mode
+        self.promptModeId = promptModeId
+        self.coverImageData = coverImageData
+        self.coverImageDataURL = coverImageDataURL
+        self.coverPosition = RoleCardCoverPosition(rawValue: coverPosition)?.rawValue ?? RoleCardCoverPosition.centerCenter.rawValue
+        self.customSections = customSections
+        self.openingDialogues = openingDialogues.isEmpty ? [OpeningDialogue()] : openingDialogues
+        self.activeOpeningDialogueId = activeOpeningDialogueId.isEmpty ? self.openingDialogues.first?.id ?? "" : activeOpeningDialogueId
+        self.lorebooks = lorebooks
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        mode = try container.decodeIfPresent(RoleCardMode.self, forKey: .mode) ?? .multi
+        promptModeId = try container.decodeIfPresent(String.self, forKey: .promptModeId) ?? mode.rawValue
+        coverImageData = try container.decodeIfPresent(Data.self, forKey: .coverImageData)
+        coverImageDataURL = try container.decodeIfPresent(String.self, forKey: .coverImageDataURL) ?? ""
+        coverPosition = try container.decodeIfPresent(String.self, forKey: .coverPosition) ?? RoleCardCoverPosition.centerCenter.rawValue
+        if RoleCardCoverPosition(rawValue: coverPosition) == nil {
+            coverPosition = RoleCardCoverPosition.centerCenter.rawValue
+        }
+        customSections = try container.decodeIfPresent([CustomSection].self, forKey: .customSections) ?? []
+        openingDialogues = try container.decodeIfPresent([OpeningDialogue].self, forKey: .openingDialogues) ?? [OpeningDialogue()]
+        if openingDialogues.isEmpty {
+            openingDialogues = [OpeningDialogue()]
+        }
+        activeOpeningDialogueId = try container.decodeIfPresent(String.self, forKey: .activeOpeningDialogueId) ?? openingDialogues.first?.id ?? ""
+        if !openingDialogues.contains(where: { $0.id == activeOpeningDialogueId }) {
+            activeOpeningDialogueId = openingDialogues.first?.id ?? ""
+        }
+        lorebooks = try container.decodeIfPresent([LorebookEntry].self, forKey: .lorebooks) ?? []
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
+
     var activeOpeningDialogue: OpeningDialogue? {
         openingDialogues.first { $0.id == activeOpeningDialogueId } ?? openingDialogues.first
+    }
+}
+
+struct NovelAIModelOption: Identifiable, Hashable {
+    var id: String
+    var title: String
+    var description: String
+
+    static let defaultID = "nai-diffusion-4-5-full"
+
+    static let allCases: [NovelAIModelOption] = [
+        NovelAIModelOption(
+            id: "nai-diffusion-4-5-full",
+            title: "V4.5 Full",
+            description: "NovelAI Diffusion V4.5 Full：最新完整模型。"
+        ),
+        NovelAIModelOption(
+            id: "nai-diffusion-4-5-curated",
+            title: "V4.5 Curated",
+            description: "NovelAI Diffusion V4.5 Curated：較乾淨穩定的 curated 模型。"
+        ),
+        NovelAIModelOption(
+            id: "nai-diffusion-4-full",
+            title: "V4 Full",
+            description: "NovelAI Diffusion V4 Full：V4 完整模型。"
+        ),
+        NovelAIModelOption(
+            id: "nai-diffusion-4-curated-preview",
+            title: "V4 Curated",
+            description: "NovelAI Diffusion V4 Curated：V4 curated preview。"
+        ),
+        NovelAIModelOption(
+            id: "nai-diffusion-3",
+            title: "Anime V3",
+            description: "NovelAI Diffusion Anime V3。"
+        ),
+        NovelAIModelOption(
+            id: "nai-diffusion-furry-3",
+            title: "Furry V3",
+            description: "NovelAI Diffusion Furry V3。"
+        )
+    ]
+
+    static func option(for id: String) -> NovelAIModelOption? {
+        allCases.first { $0.id == id }
+    }
+
+    static func knownIDOrDefault(_ id: String) -> String {
+        option(for: id) == nil ? defaultID : id
+    }
+
+    static func title(for id: String) -> String {
+        option(for: id)?.title ?? option(for: defaultID)?.title ?? "V4.5 Full"
     }
 }
 
@@ -197,7 +389,7 @@ struct CompressionTriggerConfig: Codable, Hashable {
 }
 
 struct NovelAIImageGenerationSettings: Codable, Hashable {
-    var model: String = "nai-diffusion-4-full"
+    var model: String = NovelAIModelOption.defaultID
     var negativePrompt: String = "lowres, bad anatomy"
     var width: Int = 832
     var height: Int = 1216
@@ -213,7 +405,7 @@ struct NovelAIImageGenerationSettings: Codable, Hashable {
     var seed: Int?
 
     init(
-        model: String = "nai-diffusion-4-full",
+        model: String = NovelAIModelOption.defaultID,
         negativePrompt: String = "lowres, bad anatomy",
         width: Int = 832,
         height: Int = 1216,
@@ -228,7 +420,7 @@ struct NovelAIImageGenerationSettings: Codable, Hashable {
         imageFormat: String = "png",
         seed: Int? = nil
     ) {
-        self.model = model
+        self.model = NovelAIModelOption.knownIDOrDefault(model)
         self.negativePrompt = negativePrompt
         self.width = width
         self.height = height
@@ -246,7 +438,9 @@ struct NovelAIImageGenerationSettings: Codable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        model = try container.decodeIfPresent(String.self, forKey: .model) ?? "nai-diffusion-4-full"
+        model = NovelAIModelOption.knownIDOrDefault(
+            try container.decodeIfPresent(String.self, forKey: .model) ?? NovelAIModelOption.defaultID
+        )
         negativePrompt = try container.decodeIfPresent(String.self, forKey: .negativePrompt) ?? "lowres, bad anatomy"
         width = try container.decodeIfPresent(Int.self, forKey: .width) ?? 832
         height = try container.decodeIfPresent(Int.self, forKey: .height) ?? 1216
@@ -746,6 +940,48 @@ struct NovelAIStudioSettings: Codable, Hashable {
     }
 }
 
+struct AppDefaultsSnapshot: Codable, Hashable {
+    var userProfile = UserProfile()
+    var apiSettings = APISettings()
+    var roleCards: [RoleCard] = []
+    var activeRoleCardId: String = ""
+    var activeAssistantMode: String = ""
+    var promptModes: [PromptModeConfig] = AppState.defaultPromptModes()
+    var timeTracking = TimeTrackingConfig()
+    var novelAIStudioSettings = NovelAIStudioSettings()
+    var createdAt: Date = Date()
+    var updatedAt: Date = Date()
+
+    init() {}
+
+    init(state: AppState, date: Date = Date()) {
+        userProfile = state.userProfile
+        apiSettings = state.apiSettings
+        roleCards = state.roleCards
+        activeRoleCardId = state.activeRoleCardId
+        activeAssistantMode = state.activeAssistantMode
+        promptModes = state.promptModes
+        timeTracking = state.timeTracking
+        novelAIStudioSettings = state.novelAIStudioSettings
+        createdAt = date
+        updatedAt = date
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        userProfile = try container.decodeIfPresent(UserProfile.self, forKey: .userProfile) ?? UserProfile()
+        apiSettings = try container.decodeIfPresent(APISettings.self, forKey: .apiSettings) ?? APISettings()
+        roleCards = try container.decodeIfPresent([RoleCard].self, forKey: .roleCards) ?? []
+        activeRoleCardId = try container.decodeIfPresent(String.self, forKey: .activeRoleCardId) ?? ""
+        activeAssistantMode = try container.decodeIfPresent(String.self, forKey: .activeAssistantMode) ?? ""
+        promptModes = try container.decodeIfPresent([PromptModeConfig].self, forKey: .promptModes) ?? AppState.defaultPromptModes()
+        timeTracking = try container.decodeIfPresent(TimeTrackingConfig.self, forKey: .timeTracking) ?? TimeTrackingConfig()
+        novelAIStudioSettings = try container.decodeIfPresent(NovelAIStudioSettings.self, forKey: .novelAIStudioSettings) ?? NovelAIStudioSettings()
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
+}
+
 struct AppState: Codable, Hashable {
     var userProfile = UserProfile()
     var apiSettings = APISettings()
@@ -759,6 +995,7 @@ struct AppState: Codable, Hashable {
     var timeTracking = TimeTrackingConfig()
     var novelAIAlbum: [NovelAIAlbumItem] = []
     var novelAIStudioSettings = NovelAIStudioSettings()
+    var localDefaults: AppDefaultsSnapshot?
     var updatedAt: Date = Date()
 
     var activeRoleCard: RoleCard? {
@@ -789,6 +1026,7 @@ struct AppState: Codable, Hashable {
         timeTracking = try container.decodeIfPresent(TimeTrackingConfig.self, forKey: .timeTracking) ?? TimeTrackingConfig()
         novelAIAlbum = try container.decodeIfPresent([NovelAIAlbumItem].self, forKey: .novelAIAlbum) ?? []
         novelAIStudioSettings = try container.decodeIfPresent(NovelAIStudioSettings.self, forKey: .novelAIStudioSettings) ?? NovelAIStudioSettings()
+        localDefaults = try container.decodeIfPresent(AppDefaultsSnapshot.self, forKey: .localDefaults)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
