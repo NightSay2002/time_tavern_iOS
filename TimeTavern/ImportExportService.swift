@@ -12,6 +12,20 @@ final class ImportExportService {
         try importRoleCardJSON(from: try Data(contentsOf: url), existingRoleCards: existingRoleCards)
     }
 
+    func importRoleCardFile(from url: URL, existingRoleCards: [RoleCard]) throws -> RoleCard {
+        try importRoleCard(from: try Data(contentsOf: url), fileName: url.lastPathComponent, existingRoleCards: existingRoleCards)
+    }
+
+    func importRoleCard(from data: Data, fileName: String = "", existingRoleCards: [RoleCard]) throws -> RoleCard {
+        if let card = try? importRoleCardJSON(from: data, existingRoleCards: existingRoleCards) {
+            return card
+        }
+        guard let payload = try Self.extractRoleCardPayloadFromImageData(data) else {
+            throw TimeTavernError.invalidImport
+        }
+        return try importRoleCardJSON(from: Self.attachImportedImageCover(to: payload, imageData: data), existingRoleCards: existingRoleCards)
+    }
+
     func importRoleCardJSON(from data: Data, existingRoleCards: [RoleCard]) throws -> RoleCard {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw TimeTavernError.invalidImport
@@ -146,6 +160,187 @@ final class ImportExportService {
         }
         next.coverPosition = RoleCardCoverPosition(rawValue: next.coverPosition)?.rawValue ?? RoleCardCoverPosition.centerCenter.rawValue
         return next
+    }
+
+    private static func extractRoleCardPayloadFromImageData(_ data: Data) throws -> Data? {
+        if let pngPayload = try extractPngRoleCardPayload(from: data) {
+            return pngPayload
+        }
+        return try extractJpegRoleCardPayload(from: data)
+    }
+
+    private static func extractPngRoleCardPayload(from data: Data) throws -> Data? {
+        let bytes = [UInt8](data)
+        let signature: [UInt8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+        guard bytes.count >= signature.count,
+              Array(bytes.prefix(signature.count)) == signature
+        else { return nil }
+        let metadataKeys: Set<String> = ["chara", "character", "ccv3", "chara_card_v2", "sillytavern_json"]
+        var offset = 8
+        while offset + 12 <= bytes.count {
+            let length = (Int(bytes[offset]) << 24) |
+                (Int(bytes[offset + 1]) << 16) |
+                (Int(bytes[offset + 2]) << 8) |
+                Int(bytes[offset + 3])
+            let dataStart = offset + 8
+            let dataEnd = dataStart + length
+            guard length >= 0, dataEnd + 4 <= bytes.count else { break }
+            let type = String(bytes: bytes[(offset + 4)..<(offset + 8)], encoding: .ascii) ?? ""
+            let chunk = Array(bytes[dataStart..<dataEnd])
+            let entry = type == "tEXt" ? readPngTextChunk(chunk) : (type == "iTXt" ? readPngInternationalTextChunk(chunk) : nil)
+            if let entry, metadataKeys.contains(entry.key.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return try roleCardPayloadData(from: entry.value)
+            }
+            offset = dataEnd + 4
+        }
+        return nil
+    }
+
+    private static func extractJpegRoleCardPayload(from data: Data) throws -> Data? {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 4, bytes[0] == 0xff, bytes[1] == 0xd8 else { return nil }
+        let magic = "TimeTavernRoleCard\0"
+        var chunks: [(index: Int, total: Int, content: String)] = []
+        var offset = 2
+        while offset + 4 < bytes.count {
+            guard bytes[offset] == 0xff else { break }
+            while offset < bytes.count, bytes[offset] == 0xff {
+                offset += 1
+            }
+            guard offset < bytes.count else { break }
+            let marker = bytes[offset]
+            offset += 1
+            if marker == 0xda || marker == 0xd9 {
+                break
+            }
+            if marker >= 0xd0 && marker <= 0xd7 {
+                continue
+            }
+            guard offset + 2 <= bytes.count else { break }
+            let length = (Int(bytes[offset]) << 8) | Int(bytes[offset + 1])
+            guard length >= 2, offset + length <= bytes.count else { break }
+            let segmentData = Data(bytes[(offset + 2)..<(offset + length)])
+            if marker == 0xef, let text = String(data: segmentData, encoding: .utf8), text.hasPrefix(magic) {
+                let rest = String(text.dropFirst(magic.count))
+                if let separator = rest.firstIndex(of: "\0") {
+                    let prefix = String(rest[..<separator])
+                    if let parsed = parseJpegRoleCardChunkPrefix(prefix) {
+                        chunks.append((
+                            index: parsed.index,
+                            total: parsed.total,
+                            content: String(rest[rest.index(after: separator)...])
+                        ))
+                    } else {
+                        return try roleCardPayloadData(from: rest)
+                    }
+                } else {
+                    return try roleCardPayloadData(from: rest)
+                }
+            }
+            if marker == 0xfe,
+               let text = String(data: segmentData, encoding: .utf8),
+               let brace = text.firstIndex(of: "{") {
+                if let payload = try? roleCardPayloadData(from: String(text[brace...])) {
+                    return payload
+                }
+            }
+            offset += length
+        }
+        guard !chunks.isEmpty else { return nil }
+        chunks.sort { $0.index < $1.index }
+        let expectedTotal = chunks[0].total
+        guard chunks.count == expectedTotal else {
+            throw TimeTavernError.invalidImport
+        }
+        return try roleCardPayloadData(from: chunks.map(\.content).joined())
+    }
+
+    private static func parseJpegRoleCardChunkPrefix(_ prefix: String) -> (index: Int, total: Int)? {
+        let parts = prefix.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              parts[0].count == 4,
+              parts[1].count == 4,
+              let index = Int(parts[0]),
+              let total = Int(parts[1])
+        else { return nil }
+        return (index, total)
+    }
+
+    private static func roleCardPayloadData(from text: String) throws -> Data {
+        let source = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidates = [source, Data(base64Encoded: source).flatMap { String(data: $0, encoding: .utf8) }]
+            .compactMap { $0 }
+        for candidate in candidates {
+            guard let data = candidate.data(using: .utf8),
+                  (try? JSONSerialization.jsonObject(with: data)) != nil
+            else { continue }
+            return data
+        }
+        throw TimeTavernError.invalidImport
+    }
+
+    private static func readPngTextChunk(_ bytes: [UInt8]) -> (key: String, value: String)? {
+        guard let separator = bytes.firstIndex(of: 0), separator > 0 else { return nil }
+        let key = String(data: Data(bytes[..<separator]), encoding: .isoLatin1) ?? ""
+        let value = String(data: Data(bytes[(separator + 1)...]), encoding: .isoLatin1) ?? ""
+        return key.isEmpty ? nil : (key, value)
+    }
+
+    private static func readPngInternationalTextChunk(_ bytes: [UInt8]) -> (key: String, value: String)? {
+        guard let keywordEnd = bytes.firstIndex(of: 0),
+              keywordEnd > 0,
+              keywordEnd + 3 < bytes.count,
+              bytes[keywordEnd + 1] == 0
+        else { return nil }
+        var cursor = keywordEnd + 3
+        while cursor < bytes.count, bytes[cursor] != 0 {
+            cursor += 1
+        }
+        cursor += 1
+        while cursor < bytes.count, bytes[cursor] != 0 {
+            cursor += 1
+        }
+        cursor += 1
+        guard cursor < bytes.count else { return nil }
+        let key = String(data: Data(bytes[..<keywordEnd]), encoding: .utf8) ?? ""
+        let value = String(data: Data(bytes[cursor...]), encoding: .utf8) ?? ""
+        return key.isEmpty ? nil : (key, value)
+    }
+
+    private static func attachImportedImageCover(to payloadData: Data, imageData: Data) throws -> Data {
+        guard var payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any] else {
+            return payloadData
+        }
+        let imageDataURL = dataURL(forImageData: imageData)
+        if var data = payload["data"] as? [String: Any] {
+            if isEmptyString(data["avatar"]) {
+                data["avatar"] = imageDataURL
+            }
+            if var extensions = data["extensions"] as? [String: Any] {
+                for key in ["time_tavern_role_card", "timeTavernRoleCard"] {
+                    if var embedded = extensions[key] as? [String: Any], isEmptyString(embedded["coverImage"]) {
+                        embedded["coverImage"] = imageDataURL
+                        extensions[key] = embedded
+                    }
+                }
+                data["extensions"] = extensions
+            }
+            payload["data"] = data
+        } else if isEmptyString(payload["coverImage"]) {
+            payload["coverImage"] = imageDataURL
+        }
+        return try JSONSerialization.data(withJSONObject: payload)
+    }
+
+    private static func isEmptyString(_ value: Any?) -> Bool {
+        guard let text = value as? String else { return true }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func dataURL(forImageData data: Data) -> String {
+        let bytes = [UInt8](data.prefix(8))
+        let mimeType = bytes.count >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8 ? "image/jpeg" : "image/png"
+        return "data:\(mimeType);base64,\(data.base64EncodedString())"
     }
 }
 
@@ -369,6 +564,11 @@ final class BundledWebDefaultsService {
                 state.promptModes = modes
             }
         }
+        let assistantPromptURL = rootURL.appendingPathComponent("prompts/CharacterCardCreationAssistant.txt")
+        if let prompt = try? String(contentsOf: assistantPromptURL, encoding: .utf8),
+           !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            state.characterCardCreationAssistantPrompt = prompt
+        }
         return state
     }
 
@@ -386,6 +586,7 @@ final class BundledWebDefaultsService {
 private struct WebDefaults: Decodable {
     var activeRoleCardId: String?
     var activeAssistantMode: String?
+    var characterCardCreationAssistantPrompt: String?
     var userProfile: WebUserProfile?
     var roleCards: [WebRoleCard] = []
     var conversationSettings: WebConversationSettings?
@@ -400,7 +601,11 @@ private struct WebDefaults: Decodable {
         } else {
             state.activeRoleCardId = state.roleCards.first?.id ?? ""
         }
-        state.activeAssistantMode = activeAssistantMode ?? ""
+        state.activeAssistantMode = AssistantCard.normalizedMode(activeAssistantMode)
+        if let characterCardCreationAssistantPrompt,
+           !characterCardCreationAssistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            state.characterCardCreationAssistantPrompt = characterCardCreationAssistantPrompt
+        }
         if let timeTracking { state.timeTracking = timeTracking.native }
         if let conversationSettings {
             state.apiSettings.deepSeekModel = conversationSettings.chatOutputModel ?? state.apiSettings.deepSeekModel
@@ -444,30 +649,42 @@ private struct WebTimeTracking: Decodable {
     struct AutoPeriod: Decodable {
         var enabled: Bool?
         var roundsPerPeriod: Int?
+        var turnsSinceChange: Int?
     }
 
     var enabled: Bool?
     var currentDayNumber: Int?
     var currentPeriod: String?
+    var currentYear: Int?
+    var currentMonth: Int?
+    var currentDate: Int?
     var autoPeriod: AutoPeriod?
+    var config: TimeTrackingRulesConfig?
+    var updatedAt: String?
 
     var native: TimeTrackingConfig {
-        TimeTrackingConfig(
+        var config = TimeTrackingConfig(
             enabled: enabled ?? true,
             day: currentDayNumber ?? 1,
-            period: Self.localizedPeriod(currentPeriod),
+            period: currentPeriod ?? TimeTrackingPeriod.morning.rawValue,
             autoAdvanceRounds: autoPeriod?.roundsPerPeriod ?? 3
         )
-    }
-
-    private static func localizedPeriod(_ value: String?) -> String {
-        switch value {
-        case "morning": "早上"
-        case "noon": "中午"
-        case "evening": "晚上"
-        case let value?: value
-        case nil: "早上"
+        config.currentYear = currentYear ?? config.currentYear
+        config.currentMonth = currentMonth ?? config.currentMonth
+        config.currentDate = currentDate ?? config.currentDate
+        config.currentPeriod = TimeTrackingPeriod.normalized(currentPeriod).rawValue
+        config.autoPeriod = TimeTrackingAutoPeriodConfig(
+            enabled: autoPeriod?.enabled ?? false,
+            roundsPerPeriod: autoPeriod?.roundsPerPeriod ?? 3,
+            turnsSinceChange: autoPeriod?.turnsSinceChange ?? 0
+        )
+        if let rules = self.config {
+            config.config = rules
         }
+        if let updatedAt, let date = ISO8601DateFormatter().date(from: updatedAt) {
+            config.updatedAt = date
+        }
+        return config
     }
 }
 
@@ -481,6 +698,11 @@ private struct WebRoleCard: Decodable {
     var coverImageData: Data?
     var coverPosition: String?
     var customSections: [CustomSection]?
+    var description: String?
+    var personality: String?
+    var scene: String?
+    var systemInstruction: String?
+    var relationships: String?
     var openingDialogue: String?
     var openingDialogues: [OpeningDialogue]?
     var activeOpeningDialogueId: String?
@@ -496,7 +718,8 @@ private struct WebRoleCard: Decodable {
         card.coverImageDataURL = imageURL
         card.coverImageData = coverImageData ?? Self.decodeDataURL(imageURL)
         card.coverPosition = RoleCardCoverPosition(rawValue: coverPosition ?? "")?.rawValue ?? RoleCardCoverPosition.centerCenter.rawValue
-        card.customSections = customSections ?? []
+        let resolvedSections = customSections ?? []
+        card.customSections = resolvedSections.isEmpty ? legacyCustomSections : resolvedSections
         if let openingDialogues, !openingDialogues.isEmpty {
             card.openingDialogues = openingDialogues
         } else {
@@ -505,6 +728,20 @@ private struct WebRoleCard: Decodable {
         card.activeOpeningDialogueId = activeOpeningDialogueId ?? card.openingDialogues.first?.id ?? ""
         card.lorebooks = (lorebooks ?? []).map(\.native)
         return card
+    }
+
+    private var legacyCustomSections: [CustomSection] {
+        [
+            ("性格", personality),
+            ("場景", scene),
+            ("系統指令", systemInstruction),
+            ("詳細描述", description),
+            ("人物關係（純文字）", relationships)
+        ].compactMap { name, content in
+            let trimmed = (content ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return CustomSection(name: name, content: trimmed, enabled: true)
+        }
     }
 
     private static func decodeDataURL(_ dataURL: String?) -> Data? {
@@ -557,22 +794,30 @@ private struct WebAILog: Decodable {
     var id: String?
     var purpose: String?
     var model: String?
+    var temperature: Double?
+    var maxTokens: Int?
     var requestMessages: [ChatAPIMessage]?
     var responseText: String?
     var debugReasoningContent: String?
+    var usage: AIUsage?
     var error: String?
     var status: String?
+    var createdAt: String?
 
     var native: AILogEntry {
         AILogEntry(
             id: id ?? UUID().uuidString,
             purpose: purpose ?? "chat",
             model: model ?? "",
-            requestPreview: requestMessages?.map(\.content).joined(separator: "\n").prefixString(1200) ?? "",
-            responsePreview: (responseText ?? "").prefixString(1200),
-            reasoningPreview: (debugReasoningContent ?? "").prefixString(1200),
+            temperature: temperature,
+            maxTokens: maxTokens,
+            requestMessages: requestMessages ?? [],
+            responseText: responseText ?? "",
+            debugReasoningContent: debugReasoningContent ?? "",
+            usage: usage,
             error: error ?? "",
-            status: status ?? "success"
+            status: status ?? "success",
+            createdAt: ISO8601DateFormatter().date(from: createdAt ?? "") ?? Date()
         )
     }
 }

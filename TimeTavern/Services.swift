@@ -12,6 +12,95 @@ struct ChatCompletionResult: Hashable {
     var content: String
     var reasoningContent: String
     var model: String
+    var usage: AIUsage?
+}
+
+struct AIUsage: Codable, Hashable {
+    var promptTokens: Int?
+    var completionTokens: Int?
+    var totalTokens: Int?
+    var promptCacheHitTokens: Int?
+    var promptCacheMissTokens: Int?
+
+    init(
+        promptTokens: Int? = nil,
+        completionTokens: Int? = nil,
+        totalTokens: Int? = nil,
+        promptCacheHitTokens: Int? = nil,
+        promptCacheMissTokens: Int? = nil
+    ) {
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.totalTokens = totalTokens
+        self.promptCacheHitTokens = promptCacheHitTokens
+        self.promptCacheMissTokens = promptCacheMissTokens
+    }
+
+    var formattedSummary: String {
+        let cacheHit = promptCacheHitTokens
+        let cacheMiss = promptCacheMissTokens
+        let cacheTotal = (cacheHit ?? 0) + (cacheMiss ?? 0)
+        let cacheRate = cacheTotal > 0 && cacheHit != nil ? "\(Int((Double(cacheHit ?? 0) / Double(cacheTotal) * 100).rounded()))%" : ""
+        return [
+            promptTokens.map { "輸入 \($0)" },
+            completionTokens.map { "輸出 \($0)" },
+            totalTokens.map { "總計 \($0)" },
+            cacheHit.map { "Cache Hit \($0)" },
+            cacheMiss.map { "Cache Miss \($0)" },
+            cacheRate.isEmpty ? nil : "命中率 \(cacheRate)"
+        ].compactMap { $0 }.joined(separator: " / ")
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        promptTokens = try container.decodeIfPresent(Int.self, forKey: .promptTokens) ??
+            container.decodeIfPresent(Int.self, forKey: .promptTokensSnake)
+        completionTokens = try container.decodeIfPresent(Int.self, forKey: .completionTokens) ??
+            container.decodeIfPresent(Int.self, forKey: .completionTokensSnake)
+        totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens) ??
+            container.decodeIfPresent(Int.self, forKey: .totalTokensSnake)
+        let details = try container.decodeIfPresent(PromptTokensDetails.self, forKey: .promptTokensDetails)
+        promptCacheHitTokens = try container.decodeIfPresent(Int.self, forKey: .promptCacheHitTokens) ??
+            container.decodeIfPresent(Int.self, forKey: .promptCacheHitTokensSnake) ??
+            details?.cachedTokens ??
+            container.decodeIfPresent(Int.self, forKey: .cacheReadInputTokens) ??
+            container.decodeIfPresent(Int.self, forKey: .cacheReadTokens)
+        promptCacheMissTokens = try container.decodeIfPresent(Int.self, forKey: .promptCacheMissTokens) ??
+            container.decodeIfPresent(Int.self, forKey: .promptCacheMissTokensSnake)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(promptTokens, forKey: .promptTokens)
+        try container.encodeIfPresent(completionTokens, forKey: .completionTokens)
+        try container.encodeIfPresent(totalTokens, forKey: .totalTokens)
+        try container.encodeIfPresent(promptCacheHitTokens, forKey: .promptCacheHitTokens)
+        try container.encodeIfPresent(promptCacheMissTokens, forKey: .promptCacheMissTokens)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case promptTokens
+        case completionTokens
+        case totalTokens
+        case promptCacheHitTokens
+        case promptCacheMissTokens
+        case promptTokensSnake = "prompt_tokens"
+        case completionTokensSnake = "completion_tokens"
+        case totalTokensSnake = "total_tokens"
+        case promptCacheHitTokensSnake = "prompt_cache_hit_tokens"
+        case promptCacheMissTokensSnake = "prompt_cache_miss_tokens"
+        case promptTokensDetails = "prompt_tokens_details"
+        case cacheReadInputTokens = "cache_read_input_tokens"
+        case cacheReadTokens = "cache_read_tokens"
+    }
+
+    private struct PromptTokensDetails: Decodable, Hashable {
+        var cachedTokens: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case cachedTokens = "cached_tokens"
+        }
+    }
 }
 
 struct NovelAIMetadataImportResult: Hashable {
@@ -19,9 +108,94 @@ struct NovelAIMetadataImportResult: Hashable {
     var fallbackMessage: String?
 }
 
+struct NovelAIPromptExpansion: Codable, Hashable {
+    var name: String = ""
+    var placeholder: String = ""
+    var selected: [String] = []
+    var weightedSelected: [String] = []
+    var result: String = ""
+}
+
+struct NovelAIPromptMetadata: Codable, Hashable {
+    var promptTemplate: String = ""
+    var finalPrompt: String = ""
+    var snippets: [NovelAIPromptSnippet] = []
+    var expansions: [NovelAIPromptExpansion] = []
+}
+
+struct NovelAIPromptResolution: Hashable {
+    var promptTemplate: String = ""
+    var finalPrompt: String = ""
+    var fixedPrompt = NovelAIPromptMetadata()
+    var randomPrompt = NovelAIPromptMetadata()
+}
+
+struct DeepSeekKeySet: Hashable {
+    var primaryKey: String = ""
+    var processingKeys: [String] = []
+
+    var normalizedPrimaryKey: String {
+        primaryKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var normalizedProcessingKeys: [String] {
+        Self.normalizedProcessingKeys(processingKeys)
+    }
+
+    var allKeys: [String] {
+        var seen = Set<String>()
+        return ([normalizedPrimaryKey] + normalizedProcessingKeys)
+            .filter { !$0.isEmpty }
+            .filter { seen.insert($0).inserted }
+    }
+
+    var primaryOrFirstKey: String {
+        normalizedPrimaryKey.isEmpty ? allKeys.first ?? "" : normalizedPrimaryKey
+    }
+
+    func chatKey(cursor: Int) -> String {
+        let keys = allKeys
+        guard !keys.isEmpty else { return "" }
+        return keys[max(0, cursor) % keys.count]
+    }
+
+    func contextCompressionKey(profileIndex: Int = 0) -> String {
+        let keys = normalizedProcessingKeys
+        guard !keys.isEmpty else { return primaryOrFirstKey }
+        return keys[min(max(0, profileIndex), keys.count - 1)]
+    }
+
+    static func normalizedProcessingKeys(_ keys: [String]) -> [String] {
+        var seen = Set<String>()
+        return keys
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { seen.insert($0).inserted }
+    }
+
+    static func decodeProcessingKeys(_ payload: String) -> [String] {
+        let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        if let data = trimmed.data(using: .utf8),
+           let keys = try? JSONDecoder().decode([String].self, from: data) {
+            return normalizedProcessingKeys(keys)
+        }
+        return normalizedProcessingKeys(trimmed.components(separatedBy: .newlines))
+    }
+
+    static func encodeProcessingKeys(_ keys: [String]) -> String {
+        let normalized = normalizedProcessingKeys(keys)
+        guard let data = try? JSONEncoder().encode(normalized) else {
+            return normalized.joined(separator: "\n")
+        }
+        return String(data: data, encoding: .utf8) ?? normalized.joined(separator: "\n")
+    }
+}
+
 final class SecretStore {
     enum Key: String {
         case deepSeekAPIKey
+        case deepSeekProcessingAPIKeys
         case novelAIAPIKey
     }
 
@@ -128,6 +302,14 @@ final class DeepSeekClient {
         try await completion(apiKey: apiKey, settings: settings, messages: messages, stream: true, onDelta: onDelta)
     }
 
+    func complete(
+        apiKey: String,
+        settings: APISettings,
+        messages: [ChatAPIMessage]
+    ) async throws -> ChatCompletionResult {
+        try await completion(apiKey: apiKey, settings: settings, messages: messages, stream: false)
+    }
+
     private func completion(
         apiKey: String,
         settings: APISettings,
@@ -150,7 +332,8 @@ final class DeepSeekClient {
             messages: messages,
             temperature: settings.temperature,
             maxTokens: settings.maxTokens,
-            stream: stream
+            stream: stream,
+            streamOptions: stream ? ChatStreamOptions(includeUsage: true) : nil
         )
         request.httpBody = try JSONEncoder().encode(body)
 
@@ -159,6 +342,7 @@ final class DeepSeekClient {
             try validateHTTP(response)
             var content = ""
             var reasoning = ""
+            var usage: AIUsage?
             for try await rawLine in bytes.lines {
                 let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard line.hasPrefix("data:") else { continue }
@@ -166,6 +350,9 @@ final class DeepSeekClient {
                 if payload == "[DONE]" { break }
                 guard let data = payload.data(using: .utf8) else { continue }
                 guard let chunk = try? JSONDecoder().decode(ChatStreamChunk.self, from: data) else { continue }
+                if let chunkUsage = chunk.usage {
+                    usage = chunkUsage
+                }
                 if let delta = chunk.choices.first?.delta.reasoningContent, !delta.isEmpty {
                     reasoning += delta
                 }
@@ -174,7 +361,7 @@ final class DeepSeekClient {
                     onDelta?(delta)
                 }
             }
-            return ChatCompletionResult(content: content, reasoningContent: reasoning, model: settings.deepSeekModel)
+            return ChatCompletionResult(content: content, reasoningContent: reasoning, model: settings.deepSeekModel, usage: usage)
         } else {
             let (data, response) = try await session.data(for: request)
             try validateHTTP(response, data: data)
@@ -183,7 +370,8 @@ final class DeepSeekClient {
             return ChatCompletionResult(
                 content: message?.content ?? "",
                 reasoningContent: message?.reasoningContent ?? "",
-                model: settings.deepSeekModel
+                model: settings.deepSeekModel,
+                usage: payload.usage
             )
         }
     }
@@ -203,10 +391,20 @@ private struct ChatRequest: Encodable {
     var temperature: Double
     var maxTokens: Int
     var stream: Bool
+    var streamOptions: ChatStreamOptions?
 
     enum CodingKeys: String, CodingKey {
         case model, messages, temperature, stream
         case maxTokens = "max_tokens"
+        case streamOptions = "stream_options"
+    }
+}
+
+private struct ChatStreamOptions: Encodable {
+    var includeUsage: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case includeUsage = "include_usage"
     }
 }
 
@@ -224,6 +422,7 @@ private struct ChatResponse: Decodable {
         }
     }
     var choices: [Choice]
+    var usage: AIUsage?
 }
 
 private struct ChatStreamChunk: Decodable {
@@ -240,6 +439,17 @@ private struct ChatStreamChunk: Decodable {
         }
     }
     var choices: [Choice]
+    var usage: AIUsage?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        choices = try container.decodeIfPresent([Choice].self, forKey: .choices) ?? []
+        usage = try container.decodeIfPresent(AIUsage.self, forKey: .usage)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case choices, usage
+    }
 }
 
 final class NovelAIClient {
@@ -284,21 +494,23 @@ final class NovelAIClient {
     func generateImages(
         apiKey: String,
         settings: APISettings,
-        studioSettings: NovelAIStudioSettings
+        studioSettings: NovelAIStudioSettings,
+        requestCount: Int = 1
     ) async throws -> [NovelAIAlbumItem] {
         guard !apiKey.isEmpty else { throw TimeTavernError.missingNovelAIKey }
         let url = URL(string: settings.naiImageBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/ai/generate-image")!
-        let loops = max(1, min(studioSettings.loopCount, 20))
+        let loops = max(1, min(requestCount, 9999))
         var results: [NovelAIAlbumItem] = []
         for _ in 0..<loops {
-            let prompt = Self.resolvedPrompt(from: studioSettings)
+            let resolution = try Self.resolvePrompt(from: studioSettings)
+            let prompt = resolution.finalPrompt
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.timeoutInterval = 600
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             request.setValue(Self.correlationID(), forHTTPHeaderField: "x-correlation-id")
-            let payload = Self.buildImageGenerationRequest(studioSettings: studioSettings, prompt: prompt)
+            let payload = Self.buildImageGenerationRequest(studioSettings: studioSettings, promptResolution: resolution)
             request.httpBody = try JSONEncoder().encode(payload)
             let (data, response) = try await session.data(for: request)
             try validateHTTP(response, data: data)
@@ -312,30 +524,112 @@ final class NovelAIClient {
         return results
     }
 
+    static func estimatedAnlas(for settings: NovelAIStudioSettings) -> Int {
+        let normalMegapixels = Double(832 * 1216) / Double(1024 * 1024)
+        let width = max(64, settings.imageSettings.width)
+        let height = max(64, settings.imageSettings.height)
+        let megapixels = max(0.05, Double(width * height) / Double(1024 * 1024))
+        let stepFactor = max(0.15, Double(max(1, settings.imageSettings.steps)) / 28)
+        let baseImageFactor = settings.imageToImageImageData == nil ? 1.0 : 1.15
+        let sampleCount = max(1, settings.imageSettings.samples)
+        let vibeCount = settings.vibeTransferImages.filter { $0.enabled && $0.imageData != nil }.count
+        let preciseCount = settings.preciseReferenceImages.filter { $0.enabled && $0.imageData != nil }.count
+        let extraVibe = vibeCount > 4 ? Double((vibeCount - 4) * 2) : 0
+        let extraPrecise = Double(preciseCount * 5)
+        let estimate = (20 * (megapixels / normalMegapixels) * stepFactor * baseImageFactor + extraVibe + extraPrecise) * Double(sampleCount)
+        return max(1, Int(ceil(estimate)))
+    }
+
+    static func loopRequestLimit(from loopCount: Int) -> Int? {
+        loopCount == 0 ? nil : max(1, min(loopCount, 9999))
+    }
+
     static func resolvedPrompt(from settings: NovelAIStudioSettings, randomIndex: ((Int) -> Int)? = nil) -> String {
-        var prompt = settings.basePrompt
-        let fixed = settings.fixedSnippets.filter(\.enabled)
-        let random = settings.randomSnippets.filter(\.enabled)
-        let snippets = fixed + selectedRandomSnippets(random, randomIndex: randomIndex)
-        for snippet in snippets where !snippet.name.isEmpty {
-            prompt = prompt.replacingOccurrences(of: "||\(snippet.name)||", with: snippet.content)
-        }
-        let appendedSnippets = snippets.filter { !prompt.contains($0.content) }.map(\.content)
-        let characterPrompts = settings.characterPrompts
+        (try? resolvePrompt(from: settings, randomIndex: randomIndex).finalPrompt) ?? ""
+    }
+
+    static func resolvePrompt(from settings: NovelAIStudioSettings, randomIndex: ((Int) -> Int)? = nil) throws -> NovelAIPromptResolution {
+        let template = settings.basePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fixedSnippets = settings.fixedSnippets
             .filter(\.enabled)
-            .map { $0.name.isEmpty ? $0.prompt : "\($0.name): \($0.prompt)" }
-        return ([prompt] + appendedSnippets + characterPrompts)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: ", ")
+            .map(normalizedFixedSnippet)
+            .filter { !$0.name.isEmpty || !$0.content.isEmpty }
+        let randomSnippets = settings.randomSnippets
+            .filter(\.enabled)
+            .map(normalizedRandomSnippet)
+            .filter { !$0.name.isEmpty || !$0.content.isEmpty }
+        let fixedMap = Dictionary(grouping: fixedSnippets, by: \.name).compactMapValues(\.first)
+        let randomMap = Dictionary(grouping: randomSnippets, by: \.name).compactMapValues(\.first)
+        var fixedExpansions: [NovelAIPromptExpansion] = []
+        var randomExpansions: [NovelAIPromptExpansion] = []
+        var expanded = template
+
+        expanded = try replacePromptPlaceholders(in: expanded, pattern: #"\|\|\s*([^|]+?)\s*\|\|"#) { placeholder, rawName in
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fixed = fixedMap[name]
+            let random = randomMap[name]
+            if fixed != nil, random != nil {
+                throw TimeTavernError.network("Prompt 片段名字重複：\(name)，固定與隨機片段不能同名。")
+            }
+            if let fixed {
+                let result = cleanExpandedPrompt(fixed.content)
+                fixedExpansions.append(NovelAIPromptExpansion(name: name, placeholder: placeholder, result: result))
+                return result
+            }
+            if let random {
+                let expansion = expandRandomPromptSnippet(random, placeholder: placeholder, randomIndex: randomIndex)
+                randomExpansions.append(expansion)
+                return expansion.result
+            }
+            throw TimeTavernError.network("Prompt 找不到片段：\(name)。")
+        }
+
+        expanded = try replacePromptPlaceholders(in: expanded, pattern: #"\{\{\s*([^}]+?)\s*\}\}"#) { placeholder, rawName in
+            let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let random = randomMap[name] else { return placeholder }
+            let expansion = expandRandomPromptSnippet(random, placeholder: placeholder, randomIndex: randomIndex)
+            randomExpansions.append(expansion)
+            return expansion.result
+        }
+
+        let finalPrompt = cleanExpandedPrompt(expanded)
+        return NovelAIPromptResolution(
+            promptTemplate: template,
+            finalPrompt: finalPrompt,
+            fixedPrompt: NovelAIPromptMetadata(
+                promptTemplate: template,
+                finalPrompt: finalPrompt,
+                snippets: fixedSnippets,
+                expansions: fixedExpansions
+            ),
+            randomPrompt: NovelAIPromptMetadata(
+                promptTemplate: template,
+                finalPrompt: finalPrompt,
+                snippets: randomSnippets,
+                expansions: randomExpansions
+            )
+        )
     }
 
     static func buildImageGenerationRequest(studioSettings: NovelAIStudioSettings, prompt: String? = nil) -> NovelAIRequest {
+        let resolution = (try? resolvePrompt(from: studioSettings)) ?? NovelAIPromptResolution(
+            promptTemplate: studioSettings.basePrompt,
+            finalPrompt: prompt ?? cleanExpandedPrompt(studioSettings.basePrompt)
+        )
+        return buildImageGenerationRequest(studioSettings: studioSettings, promptResolution: resolution, overridePrompt: prompt)
+    }
+
+    static func buildImageGenerationRequest(
+        studioSettings: NovelAIStudioSettings,
+        promptResolution: NovelAIPromptResolution,
+        overridePrompt: String? = nil
+    ) -> NovelAIRequest {
         let imageSettings = studioSettings.imageSettings
-        let resolvedPrompt = prompt ?? resolvedPrompt(from: studioSettings)
+        let resolvedPrompt = overridePrompt ?? promptResolution.finalPrompt
         let model = NovelAIModelOption.knownIDOrDefault(imageSettings.model)
         let references = studioSettings.vibeTransferImages.filter { $0.enabled && $0.imageData != nil }
         let preciseReferences = studioSettings.preciseReferenceImages.filter { $0.enabled && $0.imageData != nil }
+        let enabledCharacters = studioSettings.characterPrompts.filter { $0.enabled && (!$0.prompt.isEmpty || !$0.negativePrompt.isEmpty) }
         return NovelAIRequest(
             action: "generate",
             input: resolvedPrompt,
@@ -363,7 +657,22 @@ final class NovelAIClient {
                 noise: studioSettings.imageToImageImageData == nil ? nil : studioSettings.imageToImageNoise,
                 referenceImageMultiple: (references + preciseReferences).compactMap { $0.imageData?.base64EncodedString() },
                 referenceInformationExtractedMultiple: (references + preciseReferences).map(\.noise),
-                referenceStrengthMultiple: (references + preciseReferences).map(\.strength)
+                referenceStrengthMultiple: (references + preciseReferences).map(\.strength),
+                v4Prompt: NovelAIV4Prompt(
+                    baseCaption: resolvedPrompt,
+                    characterPrompts: enabledCharacters,
+                    negative: false
+                ),
+                v4NegativePrompt: NovelAIV4Prompt(
+                    baseCaption: studioSettings.negativePrompt,
+                    characterPrompts: enabledCharacters,
+                    negative: true
+                ),
+                uc: studioSettings.negativePrompt,
+                fixedPrompt: promptResolution.fixedPrompt,
+                fixedPromptSnippets: studioSettings.fixedSnippets,
+                randomPrompt: promptResolution.randomPrompt,
+                randomPromptSnippets: studioSettings.randomSnippets
             )
         )
     }
@@ -374,7 +683,10 @@ final class NovelAIClient {
         else { return NovelAIMetadataImportResult(settings: settings, fallbackMessage: nil) }
         var next = settings
         var fallbackMessage: String?
-        if let input = object["input"] as? String {
+        let parameters = object["parameters"] as? [String: Any] ?? object
+        if let template = object["prompt_template"] as? String ?? parameters["prompt_template"] as? String {
+            next.basePrompt = template
+        } else if let input = object["input"] as? String ?? object["prompt"] as? String {
             next.basePrompt = input
         }
         if let model = object["model"] as? String {
@@ -385,9 +697,22 @@ final class NovelAIClient {
                 next.imageSettings.model = model
             }
         }
-        let parameters = object["parameters"] as? [String: Any] ?? object
-        if let negative = parameters["negative_prompt"] as? String {
+        if let negative = parameters["negative_prompt"] as? String ?? parameters["uc"] as? String {
             next.negativePrompt = negative
+        }
+        if let fixed = decodePromptSnippets(parameters["fixed_prompt_snippets"] ?? object["fixed_prompt_snippets"]) {
+            next.fixedSnippets = fixed
+        }
+        if let random = decodePromptSnippets(parameters["random_prompt_snippets"] ?? object["random_prompt_snippets"]) {
+            next.randomSnippets = random
+        } else if let randomPrompt = parameters["random_prompt"] as? [String: Any],
+                  let snippets = decodePromptSnippets(randomPrompt["snippets"]) {
+            next.randomSnippets = snippets
+        }
+        let positiveCharacters = characterPrompts(from: parameters["v4_prompt"] ?? object["v4_prompt"], negative: false)
+        let negativeCharacters = characterPrompts(from: parameters["v4_negative_prompt"] ?? object["v4_negative_prompt"], negative: true)
+        if !positiveCharacters.isEmpty || !negativeCharacters.isEmpty {
+            next.characterPrompts = mergeCharacterPrompts(positive: positiveCharacters, negative: negativeCharacters)
         }
         if let width = parameters["width"] as? Int {
             next.imageSettings.width = width
@@ -413,14 +738,322 @@ final class NovelAIClient {
         return NovelAIMetadataImportResult(settings: next, fallbackMessage: fallbackMessage)
     }
 
+    static func importMetadata(fromImageData data: Data, into settings: NovelAIStudioSettings) -> NovelAIMetadataImportResult? {
+        guard let metadata = extractPngNovelAIMetadata(from: data) else { return nil }
+        return importMetadata(metadata, into: settings)
+    }
+
     static func settingsByImportingMetadata(_ metadata: String, into settings: NovelAIStudioSettings) -> NovelAIStudioSettings {
         importMetadata(metadata, into: settings).settings
     }
 
-    private static func selectedRandomSnippets(_ snippets: [NovelAIPromptSnippet], randomIndex: ((Int) -> Int)?) -> [NovelAIPromptSnippet] {
-        guard !snippets.isEmpty else { return [] }
-        let index = randomIndex?(snippets.count) ?? Int.random(in: 0..<snippets.count)
-        return [snippets[max(0, min(index, snippets.count - 1))]]
+    private static func extractPngNovelAIMetadata(from data: Data) -> String? {
+        let entries = readPngMetadataEntries(data)
+        if let embedded = entries["NovelAIMetadata"] ?? entries["TimeTavernNovelAIMetadata"],
+           parseJSONObject(embedded) != nil {
+            return embedded
+        }
+        guard let comment = entries["Comment"],
+              var object = parseJSONObject(comment)
+        else { return nil }
+        let looksNovelAI = object["signed_hash"] != nil ||
+            object["request_type"] != nil ||
+            object["v4_prompt"] != nil ||
+            object["v4_negative_prompt"] != nil ||
+            object["prompt"] != nil ||
+            object["uc"] != nil ||
+            object["negative_prompt"] != nil ||
+            object["steps"] != nil ||
+            object["sampler"] != nil ||
+            String(describing: entries["Software"] ?? object["model"] ?? "").range(of: "novelai", options: [.caseInsensitive]) != nil ||
+            String(describing: entries["Software"] ?? object["model"] ?? "").range(of: "nai-diffusion", options: [.caseInsensitive]) != nil
+        guard looksNovelAI else { return nil }
+        if object["prompt"] == nil, let description = entries["Description"] {
+            object["prompt"] = description
+        }
+        if object["model"] == nil, let software = entries["Software"] {
+            object["model"] = software
+        }
+        if object["negative_prompt"] == nil, let uc = object["uc"] {
+            object["negative_prompt"] = uc
+        }
+        guard let output = try? JSONSerialization.data(withJSONObject: object),
+              let text = String(data: output, encoding: .utf8)
+        else { return comment }
+        return text
+    }
+
+    private static func readPngMetadataEntries(_ data: Data) -> [String: String] {
+        let bytes = [UInt8](data)
+        let signature: [UInt8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+        guard bytes.count >= signature.count,
+              Array(bytes.prefix(signature.count)) == signature
+        else { return [:] }
+        var entries: [String: String] = [:]
+        var offset = 8
+        while offset + 12 <= bytes.count {
+            let length = (Int(bytes[offset]) << 24) |
+                (Int(bytes[offset + 1]) << 16) |
+                (Int(bytes[offset + 2]) << 8) |
+                Int(bytes[offset + 3])
+            let dataStart = offset + 8
+            let dataEnd = dataStart + length
+            guard length >= 0, dataEnd + 4 <= bytes.count else { break }
+            let type = String(bytes: bytes[(offset + 4)..<(offset + 8)], encoding: .ascii) ?? ""
+            let chunk = Array(bytes[dataStart..<dataEnd])
+            if let entry = type == "tEXt" ? readPngTextChunk(chunk) : (type == "iTXt" ? readPngInternationalTextChunk(chunk) : nil) {
+                entries[entry.key] = entry.value
+            }
+            offset = dataEnd + 4
+            if type == "IEND" {
+                break
+            }
+        }
+        return entries
+    }
+
+    private static func readPngTextChunk(_ bytes: [UInt8]) -> (key: String, value: String)? {
+        guard let separator = bytes.firstIndex(of: 0), separator > 0 else { return nil }
+        let key = String(data: Data(bytes[..<separator]), encoding: .isoLatin1) ?? ""
+        let value = String(data: Data(bytes[(separator + 1)...]), encoding: .isoLatin1) ?? ""
+        return key.isEmpty ? nil : (key, value)
+    }
+
+    private static func readPngInternationalTextChunk(_ bytes: [UInt8]) -> (key: String, value: String)? {
+        guard let keywordEnd = bytes.firstIndex(of: 0),
+              keywordEnd > 0,
+              keywordEnd + 3 < bytes.count,
+              bytes[keywordEnd + 1] == 0
+        else { return nil }
+        var cursor = keywordEnd + 3
+        while cursor < bytes.count, bytes[cursor] != 0 {
+            cursor += 1
+        }
+        cursor += 1
+        while cursor < bytes.count, bytes[cursor] != 0 {
+            cursor += 1
+        }
+        cursor += 1
+        guard cursor < bytes.count else { return nil }
+        let key = String(data: Data(bytes[..<keywordEnd]), encoding: .utf8) ?? ""
+        let value = String(data: Data(bytes[cursor...]), encoding: .utf8) ?? ""
+        return key.isEmpty ? nil : (key, value)
+    }
+
+    private static func parseJSONObject(_ text: String) -> [String: Any]? {
+        guard let data = text.data(using: .utf8) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func decodePromptSnippets(_ value: Any?) -> [NovelAIPromptSnippet]? {
+        guard let value else { return nil }
+        if let snippets = value as? [[String: Any]],
+           let data = try? JSONSerialization.data(withJSONObject: snippets),
+           let decoded = try? JSONDecoder().decode([NovelAIPromptSnippet].self, from: data) {
+            return decoded
+        }
+        if let snippets = value as? [Any],
+           let data = try? JSONSerialization.data(withJSONObject: snippets),
+           let decoded = try? JSONDecoder().decode([NovelAIPromptSnippet].self, from: data) {
+            return decoded
+        }
+        return nil
+    }
+
+    private static func characterPrompts(from value: Any?, negative: Bool) -> [NovelAICharacterPrompt] {
+        guard let object = value as? [String: Any],
+              let caption = object["caption"] as? [String: Any],
+              let charCaptions = caption["char_captions"] as? [[String: Any]]
+        else { return [] }
+        return charCaptions.enumerated().compactMap { index, item in
+            let text = item["char_caption"] as? String ?? ""
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            let center = (item["centers"] as? [[String: Any]])?.first ?? [:]
+            let x = center["x"] as? Double ?? 0.5
+            let y = center["y"] as? Double ?? 0.5
+            if negative {
+                return NovelAICharacterPrompt(name: "Character \(index + 1)", negativePrompt: text, x: x, y: y)
+            }
+            return NovelAICharacterPrompt(name: "Character \(index + 1)", prompt: text, x: x, y: y)
+        }
+    }
+
+    private static func mergeCharacterPrompts(
+        positive: [NovelAICharacterPrompt],
+        negative: [NovelAICharacterPrompt]
+    ) -> [NovelAICharacterPrompt] {
+        let count = max(positive.count, negative.count)
+        guard count > 0 else { return [] }
+        return (0..<count).map { index in
+            let positiveItem = index < positive.count ? positive[index] : NovelAICharacterPrompt(name: "Character \(index + 1)")
+            let negativeItem = index < negative.count ? negative[index] : NovelAICharacterPrompt(name: positiveItem.name)
+            return NovelAICharacterPrompt(
+                name: positiveItem.name.isEmpty ? negativeItem.name : positiveItem.name,
+                prompt: positiveItem.prompt,
+                negativePrompt: negativeItem.negativePrompt,
+                enabled: positiveItem.enabled && negativeItem.enabled,
+                x: positiveItem.x,
+                y: positiveItem.y
+            )
+        }
+    }
+
+    private static func normalizedFixedSnippet(_ snippet: NovelAIPromptSnippet) -> NovelAIPromptSnippet {
+        var next = snippet
+        next.name = snippet.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        next.content = cleanExpandedPrompt(snippet.content)
+        return next
+    }
+
+    private static func normalizedRandomSnippet(_ snippet: NovelAIPromptSnippet) -> NovelAIPromptSnippet {
+        let items = promptItems(snippet.content, preserveLeadingSpace: true)
+        var next = snippet
+        next.name = snippet.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        next.content = items.joined(separator: "\n")
+        next.min = min(max(0, snippet.min), items.count)
+        next.max = min(max(next.min, snippet.max), items.count)
+        next.squareMax = max(0, min(12, snippet.squareMax))
+        next.curlyMax = max(0, min(12, snippet.curlyMax))
+        next.weightMin = max(0, min(5, snippet.weightMin))
+        next.weightMax = max(next.weightMin, min(5, snippet.weightMax))
+        next.weightBias = max(next.weightMin, min(next.weightMax, snippet.weightBias))
+        return next
+    }
+
+    private static func replacePromptPlaceholders(
+        in text: String,
+        pattern: String,
+        replacement: (String, String) throws -> String
+    ) throws -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
+        var output = text
+        let matches = regex.matches(in: output, range: NSRange(output.startIndex..., in: output))
+        for match in matches.reversed() {
+            guard match.numberOfRanges >= 2,
+                  let wholeRange = Range(match.range(at: 0), in: output),
+                  let nameRange = Range(match.range(at: 1), in: output)
+            else { continue }
+            let placeholder = String(output[wholeRange])
+            let name = String(output[nameRange])
+            output.replaceSubrange(wholeRange, with: try replacement(placeholder, name))
+        }
+        return output
+    }
+
+    private static func expandRandomPromptSnippet(
+        _ snippet: NovelAIPromptSnippet,
+        placeholder: String,
+        randomIndex: ((Int) -> Int)?
+    ) -> NovelAIPromptExpansion {
+        let items = promptItems(snippet.content, preserveLeadingSpace: true)
+        let lower = min(snippet.min, snippet.max, items.count)
+        let upper = min(max(snippet.min, snippet.max), items.count)
+        let count = items.isEmpty ? 0 : randomIntInclusive(lower, upper, randomIndex: randomIndex)
+        let selected = Array(shuffled(items, randomIndex: randomIndex).prefix(count))
+        let weighted = selected
+            .map { applyRandomPromptWeight($0, snippet: snippet, randomIndex: randomIndex) }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let result = cleanExpandedPrompt(weighted.joined(separator: ","))
+        return NovelAIPromptExpansion(
+            name: snippet.name,
+            placeholder: placeholder,
+            selected: selected,
+            weightedSelected: weighted,
+            result: result
+        )
+    }
+
+    private static func promptItems(_ text: String, preserveLeadingSpace: Bool = false) -> [String] {
+        text.split(whereSeparator: \.isNewline)
+            .map { preserveLeadingSpace ? String($0).trimmingCharacters(in: .whitespacesAndNewlines.subtracting(.whitespaces)) : String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    private static func cleanExpandedPrompt(_ prompt: String) -> String {
+        prompt
+            .replacingOccurrences(of: #"\r?\n+"#, with: ",", options: .regularExpression)
+            .replacingOccurrences(of: #"[，,]\s*[，,]+"#, with: ",", options: .regularExpression)
+            .replacingOccurrences(of: #"\s*[,，]\s*"#, with: ",", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ",，").union(.whitespacesAndNewlines))
+    }
+
+    private static func shuffled<T>(_ values: [T], randomIndex: ((Int) -> Int)?) -> [T] {
+        var output = values
+        guard output.count > 1 else { return output }
+        for index in stride(from: output.count - 1, through: 1, by: -1) {
+            let swapIndex = randomIndex.map { max(0, min($0(index + 1), index)) } ?? Int.random(in: 0...index)
+            output.swapAt(index, swapIndex)
+        }
+        return output
+    }
+
+    private static func randomIntInclusive(_ minValue: Int, _ maxValue: Int, randomIndex: ((Int) -> Int)?) -> Int {
+        let low = min(minValue, maxValue)
+        let high = max(minValue, maxValue)
+        guard high > low else { return low }
+        if let randomIndex {
+            return low + max(0, min(randomIndex(high - low + 1), high - low))
+        }
+        return Int.random(in: low...high)
+    }
+
+    private static func splitPromptChain(_ text: String, preserveLeadingSpace: Bool = true) -> [String] {
+        text.split { $0 == "," || $0 == "，" }
+            .map { preserveLeadingSpace ? String($0).trimmingCharacters(in: .whitespacesAndNewlines.subtracting(.whitespaces)) : String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    private static func applyRandomPromptWeight(
+        _ text: String,
+        snippet: NovelAIPromptSnippet,
+        randomIndex: ((Int) -> Int)?
+    ) -> String {
+        splitPromptChain(text)
+            .map { applyRandomPromptWeightToToken($0, snippet: snippet, randomIndex: randomIndex) }
+            .joined(separator: ",")
+    }
+
+    private static func applyRandomPromptWeightToToken(
+        _ text: String,
+        snippet: NovelAIPromptSnippet,
+        randomIndex: ((Int) -> Int)?
+    ) -> String {
+        var output = text.trimmingCharacters(in: .whitespacesAndNewlines.subtracting(.whitespaces))
+        guard !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
+        var weightTypes: [String] = []
+        if snippet.squareEnabled, snippet.squareMax > 0 { weightTypes.append("square") }
+        if snippet.curlyEnabled, snippet.curlyMax > 0 { weightTypes.append("curly") }
+        if snippet.weightEnabled, max(snippet.weightMin, snippet.weightMax) > 0 { weightTypes.append("numeric") }
+        guard !weightTypes.isEmpty else { return output }
+        let selectedType = weightTypes[randomIntInclusive(0, weightTypes.count - 1, randomIndex: randomIndex)]
+        switch selectedType {
+        case "square":
+            let count = randomIntInclusive(1, snippet.squareMax, randomIndex: randomIndex)
+            output = String(repeating: "[", count: count) + output + String(repeating: "]", count: count)
+        case "curly":
+            let count = randomIntInclusive(1, snippet.curlyMax, randomIndex: randomIndex)
+            output = String(repeating: "{", count: count) + output + String(repeating: "}", count: count)
+        default:
+            let value = randomDouble(min: snippet.weightMin, max: snippet.weightMax, bias: snippet.weightBias)
+            let protected = output.last?.isNumber == true ? "\(output) " : output
+            output = "\(formatPromptWeight(value))::\(protected)::"
+        }
+        return output
+    }
+
+    private static func randomDouble(min minValue: Double, max maxValue: Double, bias: Double) -> Double {
+        let low = min(minValue, maxValue)
+        let high = max(minValue, maxValue)
+        guard high > low else { return low }
+        let center = max(low, min(high, bias))
+        let focusedLow = max(low, center - 1)
+        let focusedHigh = min(high, center + 1)
+        let useFullRange = Double.random(in: 0...1) < 0.18 || focusedHigh <= focusedLow
+        return Double.random(in: (useFullRange ? low : focusedLow)...(useFullRange ? high : focusedHigh))
+    }
+
+    private static func formatPromptWeight(_ value: Double) -> String {
+        String(format: "%.1f", (value * 10).rounded() / 10)
     }
 
     private func extractImages(fromZipData data: Data, prompt: String, negativePrompt: String, model: String) throws -> [NovelAIAlbumItem] {
@@ -476,6 +1109,62 @@ struct NovelAIRequest: Encodable {
     var parameters: NovelAIParameters
 }
 
+struct NovelAIV4Prompt: Encodable, Hashable {
+    var caption: NovelAIV4Caption
+    var useCoords: Bool
+    var useOrder: Bool
+    var legacyUC: Bool
+
+    init(baseCaption: String, characterPrompts: [NovelAICharacterPrompt], negative: Bool) {
+        caption = NovelAIV4Caption(
+            baseCaption: baseCaption,
+            charCaptions: characterPrompts.compactMap { character in
+                let text = negative ? character.negativePrompt : character.prompt
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return NovelAIV4CharacterCaption(
+                    charCaption: text,
+                    centers: [NovelAICenter(x: character.x, y: character.y)]
+                )
+            }
+        )
+        useCoords = !negative
+        useOrder = !negative
+        legacyUC = false
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case caption
+        case useCoords = "use_coords"
+        case useOrder = "use_order"
+        case legacyUC = "legacy_uc"
+    }
+}
+
+struct NovelAIV4Caption: Encodable, Hashable {
+    var baseCaption: String
+    var charCaptions: [NovelAIV4CharacterCaption]
+
+    enum CodingKeys: String, CodingKey {
+        case baseCaption = "base_caption"
+        case charCaptions = "char_captions"
+    }
+}
+
+struct NovelAIV4CharacterCaption: Encodable, Hashable {
+    var charCaption: String
+    var centers: [NovelAICenter]
+
+    enum CodingKeys: String, CodingKey {
+        case charCaption = "char_caption"
+        case centers
+    }
+}
+
+struct NovelAICenter: Encodable, Hashable {
+    var x: Double
+    var y: Double
+}
+
 struct NovelAIParameters: Encodable {
     var width: Int
     var height: Int
@@ -500,9 +1189,16 @@ struct NovelAIParameters: Encodable {
     var referenceImageMultiple: [String]
     var referenceInformationExtractedMultiple: [Double]
     var referenceStrengthMultiple: [Double]
+    var v4Prompt: NovelAIV4Prompt
+    var v4NegativePrompt: NovelAIV4Prompt
+    var uc: String
+    var fixedPrompt: NovelAIPromptMetadata
+    var fixedPromptSnippets: [NovelAIPromptSnippet]
+    var randomPrompt: NovelAIPromptMetadata
+    var randomPromptSnippets: [NovelAIPromptSnippet]
 
     enum CodingKeys: String, CodingKey {
-        case width, height, scale, sampler, steps, prompt, seed, image, strength, noise
+        case width, height, scale, sampler, steps, prompt, seed, image, strength, noise, uc
         case nSamples = "n_samples"
         case ucPreset = "ucPreset"
         case qualityToggle = "qualityToggle"
@@ -516,5 +1212,11 @@ struct NovelAIParameters: Encodable {
         case referenceImageMultiple = "reference_image_multiple"
         case referenceInformationExtractedMultiple = "reference_information_extracted_multiple"
         case referenceStrengthMultiple = "reference_strength_multiple"
+        case v4Prompt = "v4_prompt"
+        case v4NegativePrompt = "v4_negative_prompt"
+        case fixedPrompt = "fixed_prompt"
+        case fixedPromptSnippets = "fixed_prompt_snippets"
+        case randomPrompt = "random_prompt"
+        case randomPromptSnippets = "random_prompt_snippets"
     }
 }

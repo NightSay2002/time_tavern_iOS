@@ -1,6 +1,14 @@
 import Foundation
 import SwiftData
 
+extension Array {
+    mutating func remove(atValidOffsets offsets: IndexSet) {
+        for offset in offsets.sorted(by: >) where indices.contains(offset) {
+            remove(at: offset)
+        }
+    }
+}
+
 enum MessageRole: String, Codable, CaseIterable, Identifiable {
     case user
     case assistant
@@ -55,6 +63,35 @@ enum RoleCardCoverPosition: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+struct AssistantCard: Identifiable, Hashable {
+    static let characterCardCreationAssistantID = "CharacterCardCreationAssistant"
+    static let characterCardCreationAssistant = AssistantCard(
+        id: Self.characterCardCreationAssistantID,
+        displayName: "建立卡助手",
+        legacyDisplayName: "CharacterCardCreationAssistant",
+        summary: "角色卡、角色群組與無角色模式設定包建立助手。",
+        detail: "啟用後會重置目前對話，只使用助手 Prompt 直接回覆。"
+    )
+    static let allCards: [AssistantCard] = [.characterCardCreationAssistant]
+    static let defaultPrompt = "你是角色卡建立助手，請直接輸出正式正文。"
+
+    var id: String
+    var displayName: String
+    var legacyDisplayName: String
+    var summary: String
+    var detail: String
+
+    static func normalizedMode(_ value: String?) -> String {
+        let normalized = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return allCards.contains { $0.id == normalized } ? normalized : ""
+    }
+
+    static func card(for mode: String?) -> AssistantCard? {
+        let normalized = normalizedMode(mode)
+        return allCards.first { $0.id == normalized }
+    }
+}
+
 enum CompressionTriggerActionKind: String, Codable, CaseIterable, Identifiable {
     case callAPI = "call_api"
     case copyUserInput = "copy_user_input"
@@ -92,6 +129,129 @@ enum KeywordFollowupAction: String, Codable, CaseIterable, Identifiable {
         case .imageParallelReasoner: "出圖與正文並行"
         }
     }
+
+    var isImageGeneration: Bool {
+        self == .imageThenReasoner || self == .imageParallelReasoner
+    }
+}
+
+enum CompressionProfileKind: String, CaseIterable, Identifiable {
+    case normal
+    case image
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .normal: "普通大模型"
+        case .image: "跑圖大模型"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .normal:
+            "call api 後保存成模型內容；有模塊時使用 JSON model/delete，沒有模塊時直接保存純文本。"
+        case .image:
+            "call api 的輸出會當 NovelAI Base Prompt，並使用下方跑圖設定送去建立圖片。"
+        }
+    }
+}
+
+enum CompressionProfileStorageMode: String {
+    case plainText
+    case json
+
+    var title: String {
+        switch self {
+        case .plainText: "純文本保存"
+        case .json: "JSON 模塊保存"
+        }
+    }
+}
+
+enum CompressionProcessingPhase {
+    case beforeReasoner
+    case afterAssistant
+}
+
+enum UILanguageMode: String, Codable, CaseIterable, Identifiable {
+    case traditional = "zh-Hant"
+    case simplified = "zh-Hans"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .traditional: "繁體"
+        case .simplified: "簡體"
+        }
+    }
+
+    func title(in language: UILanguageMode) -> String {
+        UIChineseTextConverter.convert(title, language: language)
+    }
+}
+
+enum UIChineseTextConverter {
+    static var activeLanguage: UILanguageMode = .traditional
+
+    static let phrasePairs: [(traditional: String, simplified: String)] = [
+        ("伺服器", "服务器"),
+        ("本地服务器", "本地服务器"),
+        ("滑鼠", "鼠标"),
+        ("介面", "界面"),
+        ("網頁", "网页"),
+        ("資料", "资料"),
+        ("訊息", "讯息"),
+        ("角色卡建立助手", "角色卡建立助手"),
+        ("簡繁轉換", "简繁转换"),
+        ("繁體", "繁体"),
+        ("簡體", "简体")
+    ]
+
+    static let traditionalToSimplifiedChars: [Character: Character] = [
+        "並": "并", "併": "并", "來": "来", "係": "系", "個": "个", "們": "们",
+        "偵": "侦", "儲": "储", "備": "备", "傳": "传", "傷": "伤", "內": "内",
+        "關": "关", "刪": "删", "則": "则", "創": "创", "劇": "剧", "動": "动",
+        "務": "务", "匯": "汇", "區": "区", "協": "协", "參": "参", "啟": "启",
+        "單": "单", "嗎": "吗", "圍": "围", "圖": "图", "團": "团", "場": "场",
+        "塊": "块", "壓": "压", "壞": "坏", "學": "学", "寫": "写", "實": "实",
+        "專": "专", "對": "对", "導": "导", "張": "张", "後": "后", "從": "从",
+        "復": "复", "應": "应", "態": "态", "憶": "忆", "戶": "户", "換": "换",
+        "損": "损", "擇": "择", "攔": "拦", "敗": "败", "數": "数", "斷": "断",
+        "時": "时", "暫": "暂", "書": "书", "會": "会", "機": "机", "檔": "档",
+        "欄": "栏", "權": "权", "歡": "欢", "沒": "没", "測": "测", "準": "准",
+        "溫": "温", "為": "为", "無": "无", "產": "产", "現": "现", "環": "环",
+        "當": "当", "發": "发", "確": "确", "稱": "称", "範": "范", "簡": "简",
+        "紀": "纪", "紅": "红", "純": "纯", "細": "细", "終": "终", "組": "组",
+        "結": "结", "給": "给", "統": "统", "經": "经", "網": "网", "綴": "缀",
+        "線": "线", "編": "编", "縮": "缩", "總": "总", "繼": "继", "續": "续",
+        "義": "义", "與": "与", "舊": "旧", "蓋": "盖", "蘋": "苹", "處": "处",
+        "製": "制", "複": "复", "覆": "复", "見": "见", "規": "规", "視": "视",
+        "覽": "览", "觸": "触", "訂": "订", "計": "计", "訊": "讯", "記": "记",
+        "設": "设", "註": "注", "詞": "词", "試": "试", "話": "话", "該": "该",
+        "詳": "详", "誤": "误", "調": "调", "請": "请", "議": "议", "讀": "读",
+        "變": "变", "貼": "贴", "資": "资", "載": "载", "輪": "轮", "輯": "辑",
+        "輸": "输", "轉": "转", "這": "这", "連": "连", "進": "进", "過": "过",
+        "達": "达", "選": "选", "還": "还", "鈕": "钮", "錄": "录", "錯": "错",
+        "鍵": "键", "鐘": "钟", "門": "门", "閉": "闭", "開": "开", "間": "间",
+        "頁": "页", "項": "项", "順": "顺", "須": "须", "預": "预", "題": "题",
+        "顯": "显", "體": "体", "麼": "么", "點": "点"
+    ]
+
+    static func convert(_ text: String, language: UILanguageMode) -> String {
+        guard language == .simplified else { return text }
+        var output = text
+        for pair in phrasePairs {
+            output = output.replacingOccurrences(of: pair.traditional, with: pair.simplified)
+        }
+        return String(output.map { traditionalToSimplifiedChars[$0] ?? $0 })
+    }
+}
+
+func uiStatic(_ text: String) -> String {
+    UIChineseTextConverter.convert(text, language: UIChineseTextConverter.activeLanguage)
 }
 
 struct UserProfile: Codable, Hashable {
@@ -404,6 +564,12 @@ struct NovelAIImageGenerationSettings: Codable, Hashable {
     var imageFormat: String = "png"
     var seed: Int?
 
+    static let compressionTriggerDefault = NovelAIImageGenerationSettings(
+        model: "nai-diffusion-4-5-curated",
+        scale: 6,
+        noiseSchedule: "karras"
+    )
+
     init(
         model: String = NovelAIModelOption.defaultID,
         negativePrompt: String = "lowres, bad anatomy",
@@ -441,18 +607,20 @@ struct NovelAIImageGenerationSettings: Codable, Hashable {
         model = NovelAIModelOption.knownIDOrDefault(
             try container.decodeIfPresent(String.self, forKey: .model) ?? NovelAIModelOption.defaultID
         )
-        negativePrompt = try container.decodeIfPresent(String.self, forKey: .negativePrompt) ?? "lowres, bad anatomy"
-        width = try container.decodeIfPresent(Int.self, forKey: .width) ?? 832
-        height = try container.decodeIfPresent(Int.self, forKey: .height) ?? 1216
-        steps = try container.decodeIfPresent(Int.self, forKey: .steps) ?? 28
-        samples = try container.decodeIfPresent(Int.self, forKey: .samples) ?? 1
-        scale = try container.decodeIfPresent(Double.self, forKey: .scale) ?? 5
-        cfgRescale = try container.decodeIfPresent(Double.self, forKey: .cfgRescale) ?? 0
+        negativePrompt = try container.decodeStringFromPossibleKeys([.negativePrompt, .negative_prompt, .uc]) ?? "lowres, bad anatomy"
+        width = min(2048, max(64, try container.decodeIfPresent(Int.self, forKey: .width) ?? 832))
+        height = min(2048, max(64, try container.decodeIfPresent(Int.self, forKey: .height) ?? 1216))
+        steps = min(50, max(1, try container.decodeIfPresent(Int.self, forKey: .steps) ?? 28))
+        samples = min(8, max(1, try container.decodeIntFromPossibleKeys([.samples, .n_samples]) ?? 1))
+        scale = min(20, max(0, try container.decodeDoubleFromPossibleKeys([.scale, .guidance, .promptGuidance]) ?? 5))
+        cfgRescale = min(1.5, max(0, try container.decodeDoubleFromPossibleKeys([.cfgRescale, .cfg_rescale, .promptGuidanceRescale]) ?? 0))
         sampler = try container.decodeIfPresent(String.self, forKey: .sampler) ?? "k_euler_ancestral"
-        noiseSchedule = try container.decodeIfPresent(String.self, forKey: .noiseSchedule) ?? "native"
+        noiseSchedule = try container.decodeStringFromPossibleKeys([.noiseSchedule, .noise_schedule]) ?? "native"
         ucPreset = try container.decodeIfPresent(Int.self, forKey: .ucPreset) ?? 0
-        varietyPlus = try container.decodeIfPresent(Bool.self, forKey: .varietyPlus) ?? false
-        imageFormat = try container.decodeIfPresent(String.self, forKey: .imageFormat) ?? "png"
+        varietyPlus = try container.decodeIfPresent(Bool.self, forKey: .varietyPlus) ??
+            (try container.decodeIfPresent(Bool.self, forKey: .skipCfgAboveSigma) ?? false)
+        let decodedFormat = try container.decodeStringFromPossibleKeys([.imageFormat, .image_format]) ?? "png"
+        imageFormat = decodedFormat == "webp" ? "webp" : "png"
         if let intSeed = try? container.decode(Int.self, forKey: .seed) {
             seed = intSeed
         } else if let stringSeed = try? container.decode(String.self, forKey: .seed) {
@@ -460,6 +628,39 @@ struct NovelAIImageGenerationSettings: Codable, Hashable {
         } else {
             seed = nil
         }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(model, forKey: .model)
+        try container.encode(negativePrompt, forKey: .negativePrompt)
+        try container.encode(width, forKey: .width)
+        try container.encode(height, forKey: .height)
+        try container.encode(steps, forKey: .steps)
+        try container.encode(samples, forKey: .samples)
+        try container.encode(scale, forKey: .scale)
+        try container.encode(cfgRescale, forKey: .cfgRescale)
+        try container.encode(sampler, forKey: .sampler)
+        try container.encode(noiseSchedule, forKey: .noiseSchedule)
+        try container.encode(ucPreset, forKey: .ucPreset)
+        try container.encode(varietyPlus, forKey: .varietyPlus)
+        try container.encode(imageFormat, forKey: .imageFormat)
+        try container.encodeIfPresent(seed, forKey: .seed)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case negativePrompt, negative_prompt, uc
+        case width, height, steps
+        case samples, n_samples
+        case scale, guidance, promptGuidance
+        case cfgRescale, cfg_rescale, promptGuidanceRescale
+        case sampler
+        case noiseSchedule, noise_schedule
+        case ucPreset
+        case varietyPlus, skipCfgAboveSigma
+        case imageFormat, image_format
+        case seed
     }
 }
 
@@ -508,7 +709,7 @@ struct CompressionTriggerAction: Codable, Identifiable, Hashable {
     var novelAIPromptTemplate: String = ""
     var keywordFollowupAction: KeywordFollowupAction = .continueReasoner
     var skipReasoner: Bool = false
-    var imageGeneration: NovelAIImageGenerationSettings = NovelAIImageGenerationSettings()
+    var imageGeneration: NovelAIImageGenerationSettings = .compressionTriggerDefault
     var triggers: CompressionTriggerConfig = CompressionTriggerConfig()
     var expanded: Bool = false
 
@@ -525,7 +726,7 @@ struct CompressionTriggerAction: Codable, Identifiable, Hashable {
         novelAIPromptTemplate: String = "",
         keywordFollowupAction: KeywordFollowupAction = .continueReasoner,
         skipReasoner: Bool = false,
-        imageGeneration: NovelAIImageGenerationSettings = NovelAIImageGenerationSettings(),
+        imageGeneration: NovelAIImageGenerationSettings = .compressionTriggerDefault,
         triggers: CompressionTriggerConfig = CompressionTriggerConfig(),
         expanded: Bool = false
     ) {
@@ -570,7 +771,7 @@ struct CompressionTriggerAction: Codable, Identifiable, Hashable {
         novelAIPromptTemplate = try container.decodeIfPresent(String.self, forKey: .novelAIPromptTemplate) ?? ""
         keywordFollowupAction = try container.decodeIfPresent(KeywordFollowupAction.self, forKey: .keywordFollowupAction) ?? .continueReasoner
         skipReasoner = try container.decodeIfPresent(Bool.self, forKey: .skipReasoner) ?? skipChat
-        imageGeneration = try container.decodeIfPresent(NovelAIImageGenerationSettings.self, forKey: .imageGeneration) ?? NovelAIImageGenerationSettings()
+        imageGeneration = try container.decodeIfPresent(NovelAIImageGenerationSettings.self, forKey: .imageGeneration) ?? .compressionTriggerDefault
         triggers = try container.decodeIfPresent(CompressionTriggerConfig.self, forKey: .triggers) ?? CompressionTriggerConfig()
         expanded = try container.decodeIfPresent(Bool.self, forKey: .expanded) ?? false
         if let turn, triggers.turns.isEmpty {
@@ -685,6 +886,49 @@ struct CompressionProfile: Codable, Identifiable, Hashable {
         compressedThroughTurnNumber = try container.decodeIfPresent(Int.self, forKey: .compressedThroughTurnNumber) ?? 0
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt)
     }
+
+    var modelKind: CompressionProfileKind {
+        triggerActions.contains { $0.keywordFollowupAction.isImageGeneration } ? .image : .normal
+    }
+
+    var storageMode: CompressionProfileStorageMode {
+        contextCompression.models.isEmpty ? .plainText : .json
+    }
+
+    var storageModeDescription: String {
+        switch storageMode {
+        case .plainText:
+            "無模塊：普通大模型會以純文本保存模型內容，等同網頁端沒有模塊時的 save。"
+        case .json:
+            "已建立 \(contextCompression.models.count) 個模塊：普通大模型會要求輸出 JSON，使用 model.ID 新增與 delete.ID 刪除。"
+        }
+    }
+
+    var primaryImageTriggerActionIndex: Int? {
+        triggerActions.firstIndex { $0.keywordFollowupAction.isImageGeneration }
+    }
+
+    mutating func applyModelKind(_ kind: CompressionProfileKind) {
+        if triggerActions.isEmpty {
+            triggerActions = [CompressionTriggerAction(name: "觸發組合 1")]
+        }
+
+        switch kind {
+        case .normal:
+            for index in triggerActions.indices where triggerActions[index].keywordFollowupAction.isImageGeneration {
+                triggerActions[index].keywordFollowupAction = .continueReasoner
+                triggerActions[index].novelAIEnabled = false
+            }
+        case .image:
+            let index = primaryImageTriggerActionIndex ?? triggerActions.startIndex
+            triggerActions[index].action = .callAPI
+            triggerActions[index].keywordFollowupAction = .imageThenReasoner
+            triggerActions[index].novelAIEnabled = true
+            if triggerActions[index].imageGeneration.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                triggerActions[index].imageGeneration = .compressionTriggerDefault
+            }
+        }
+    }
 }
 
 struct PromptModeConfig: Codable, Identifiable, Hashable {
@@ -762,21 +1006,167 @@ struct ConversationMessage: Codable, Identifiable, Hashable {
     var source: String = "ios"
     var turnNumber: Int = 0
     var compressionNotice: Bool = false
+    var autoTimeWarning: String = ""
+    var feedback: String = ""
     var imageData: Data?
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
+
+    init(
+        id: String = UUID().uuidString,
+        role: MessageRole = .user,
+        content: String = "",
+        source: String = "ios",
+        turnNumber: Int = 0,
+        compressionNotice: Bool = false,
+        autoTimeWarning: String = "",
+        feedback: String = "",
+        imageData: Data? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.role = role
+        self.content = content
+        self.source = source
+        self.turnNumber = turnNumber
+        self.compressionNotice = compressionNotice
+        self.autoTimeWarning = autoTimeWarning
+        self.feedback = feedback
+        self.imageData = imageData
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        role = try container.decodeIfPresent(MessageRole.self, forKey: .role) ?? .user
+        content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
+        source = try container.decodeIfPresent(String.self, forKey: .source) ?? "ios"
+        turnNumber = try container.decodeIfPresent(Int.self, forKey: .turnNumber) ?? 0
+        compressionNotice = try container.decodeIfPresent(Bool.self, forKey: .compressionNotice) ?? false
+        autoTimeWarning = try container.decodeIfPresent(String.self, forKey: .autoTimeWarning) ?? ""
+        feedback = try container.decodeIfPresent(String.self, forKey: .feedback) ?? ""
+        imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
 }
 
 struct AILogEntry: Codable, Identifiable, Hashable {
     var id: String = UUID().uuidString
     var purpose: String = "chat"
     var model: String = ""
+    var temperature: Double?
+    var maxTokens: Int?
+    var requestMessages: [ChatAPIMessage] = []
+    var responseText: String = ""
+    var debugReasoningContent: String = ""
+    var usage: AIUsage?
     var requestPreview: String = ""
     var responsePreview: String = ""
     var reasoningPreview: String = ""
+    var usageSummary: String = ""
     var error: String = ""
     var status: String = "success"
     var createdAt: Date = Date()
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case purpose
+        case model
+        case temperature
+        case maxTokens
+        case requestMessages
+        case responseText
+        case debugReasoningContent
+        case usage
+        case requestPreview
+        case responsePreview
+        case reasoningPreview
+        case usageSummary
+        case error
+        case status
+        case createdAt
+    }
+
+    init(
+        id: String = UUID().uuidString,
+        purpose: String = "chat",
+        model: String = "",
+        temperature: Double? = nil,
+        maxTokens: Int? = nil,
+        requestMessages: [ChatAPIMessage] = [],
+        responseText: String = "",
+        debugReasoningContent: String = "",
+        usage: AIUsage? = nil,
+        requestPreview: String = "",
+        responsePreview: String = "",
+        reasoningPreview: String = "",
+        usageSummary: String = "",
+        error: String = "",
+        status: String = "success",
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.purpose = purpose
+        self.model = model
+        self.temperature = temperature
+        self.maxTokens = maxTokens
+        self.requestMessages = requestMessages
+        self.responseText = responseText.isEmpty ? responsePreview : responseText
+        self.debugReasoningContent = debugReasoningContent.isEmpty ? reasoningPreview : debugReasoningContent
+        self.usage = usage
+        self.requestPreview = requestPreview.isEmpty ? Self.preview(for: requestMessages) : requestPreview
+        self.responsePreview = responsePreview.isEmpty ? self.responseText.prefixString(1600) : responsePreview
+        self.reasoningPreview = reasoningPreview.isEmpty ? self.debugReasoningContent.prefixString(1600) : reasoningPreview
+        self.usageSummary = usageSummary.isEmpty ? (usage?.formattedSummary ?? "") : usageSummary
+        self.error = error
+        self.status = status
+        self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        purpose = try container.decodeIfPresent(String.self, forKey: .purpose) ?? "chat"
+        model = try container.decodeIfPresent(String.self, forKey: .model) ?? ""
+        temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
+        maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens)
+        requestMessages = try container.decodeIfPresent([ChatAPIMessage].self, forKey: .requestMessages) ?? []
+        responseText = try container.decodeIfPresent(String.self, forKey: .responseText) ??
+            (try container.decodeIfPresent(String.self, forKey: .responsePreview) ?? "")
+        debugReasoningContent = try container.decodeIfPresent(String.self, forKey: .debugReasoningContent) ??
+            (try container.decodeIfPresent(String.self, forKey: .reasoningPreview) ?? "")
+        usage = try container.decodeIfPresent(AIUsage.self, forKey: .usage)
+        requestPreview = try container.decodeIfPresent(String.self, forKey: .requestPreview) ?? Self.preview(for: requestMessages)
+        responsePreview = try container.decodeIfPresent(String.self, forKey: .responsePreview) ?? responseText.prefixString(1600)
+        reasoningPreview = try container.decodeIfPresent(String.self, forKey: .reasoningPreview) ?? debugReasoningContent.prefixString(1600)
+        usageSummary = try container.decodeIfPresent(String.self, forKey: .usageSummary) ?? (usage?.formattedSummary ?? "")
+        error = try container.decodeIfPresent(String.self, forKey: .error) ?? ""
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? "success"
+        createdAt = Self.decodeCreatedAt(from: container) ?? Date()
+    }
+
+    private static func preview(for messages: [ChatAPIMessage]) -> String {
+        messages.enumerated()
+            .map { index, message in
+                "#\(index + 1) \(message.role)\n\(message.content)"
+            }
+            .joined(separator: "\n\n----------------\n\n")
+            .prefixString(1600)
+    }
+
+    private static func decodeCreatedAt(from container: KeyedDecodingContainer<CodingKeys>) -> Date? {
+        if let date = try? container.decodeIfPresent(Date.self, forKey: .createdAt) {
+            return date
+        }
+        guard let text = try? container.decodeIfPresent(String.self, forKey: .createdAt) else {
+            return nil
+        }
+        return ISO8601DateFormatter().date(from: text)
+    }
 }
 
 struct SavedSession: Codable, Identifiable, Hashable {
@@ -793,34 +1183,289 @@ struct SavedSession: Codable, Identifiable, Hashable {
     var updatedAt: Date = Date()
 }
 
+enum TimeTrackingPeriod: String, Codable, CaseIterable, Identifiable {
+    case morning
+    case noon
+    case evening
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .morning: "早上"
+        case .noon: "中午"
+        case .evening: "晚上"
+        }
+    }
+
+    var next: TimeTrackingPeriod {
+        switch self {
+        case .morning: .noon
+        case .noon: .evening
+        case .evening: .morning
+        }
+    }
+
+    static func normalized(_ value: String?) -> TimeTrackingPeriod {
+        switch (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "morning", "早", "早上":
+            .morning
+        case "noon", "afternoon", "午", "中午", "下午":
+            .noon
+        case "evening", "night", "晚", "晚上":
+            .evening
+        default:
+            .morning
+        }
+    }
+}
+
+struct TimeTrackingAutoPeriodConfig: Codable, Hashable {
+    var enabled: Bool = false
+    var roundsPerPeriod: Int = 3
+    var turnsSinceChange: Int = 0
+
+    init(enabled: Bool = false, roundsPerPeriod: Int = 3, turnsSinceChange: Int = 0) {
+        self.enabled = enabled
+        self.roundsPerPeriod = max(1, roundsPerPeriod)
+        self.turnsSinceChange = max(0, turnsSinceChange)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, roundsPerPeriod, turnsPerPeriod, intervalRounds, rounds, turns
+        case turnsSinceChange, roundsSinceChange, counter
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        let rawRounds = try container.decodeIntFromPossibleKeys([
+            .roundsPerPeriod, .turnsPerPeriod, .intervalRounds, .rounds, .turns
+        ]) ?? 3
+        roundsPerPeriod = max(1, rawRounds)
+        let rawTurnsSinceChange = try container.decodeIntFromPossibleKeys([
+            .turnsSinceChange, .roundsSinceChange, .counter
+        ]) ?? 0
+        turnsSinceChange = max(0, rawTurnsSinceChange)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(roundsPerPeriod, forKey: .roundsPerPeriod)
+        try container.encode(turnsSinceChange, forKey: .turnsSinceChange)
+    }
+}
+
+struct TimeTrackingRulesConfig: Codable, Hashable {
+    static let defaultNextDayWords = ["下一天", "第二天", "隔天", "翌日", "次日", "明天", "明日"]
+    static let defaultConnectorWords = ["來到", "来到", "已經", "已经", "現在", "现在", "到了", "變成", "变成", "已是"]
+    static let defaultNoChangeWords = ["等到", "等一下", "的時候", "的时候"]
+    static let defaultMorningWords = ["早上", "早晨", "清晨", "早餐", "早飯", "早饭", "上午", "天亮"]
+    static let defaultNoonWords = ["中午", "下午", "午餐", "午飯", "午饭", "正午"]
+    static let defaultEveningWords = ["晚上", "夜晚", "晚餐", "晚飯", "晚饭", "傍晚", "深夜", "夜裡", "夜里"]
+
+    var nextDayWords: [String] = Self.defaultNextDayWords
+    var connectorWords: [String] = Self.defaultConnectorWords
+    var noChangeWords: [String] = Self.defaultNoChangeWords
+    var morningWords: [String] = Self.defaultMorningWords
+    var noonWords: [String] = Self.defaultNoonWords
+    var eveningWords: [String] = Self.defaultEveningWords
+
+    init(
+        nextDayWords: [String] = Self.defaultNextDayWords,
+        connectorWords: [String] = Self.defaultConnectorWords,
+        noChangeWords: [String] = Self.defaultNoChangeWords,
+        morningWords: [String] = Self.defaultMorningWords,
+        noonWords: [String] = Self.defaultNoonWords,
+        eveningWords: [String] = Self.defaultEveningWords
+    ) {
+        self.nextDayWords = Self.normalizedWords(nextDayWords, fallback: Self.defaultNextDayWords)
+        self.connectorWords = Self.normalizedWords(connectorWords, fallback: Self.defaultConnectorWords)
+        self.noChangeWords = Self.normalizedWords(noChangeWords, fallback: Self.defaultNoChangeWords)
+        self.morningWords = Self.normalizedWords(morningWords, fallback: Self.defaultMorningWords)
+        self.noonWords = Self.normalizedWords(noonWords, fallback: Self.defaultNoonWords)
+        self.eveningWords = Self.normalizedWords(eveningWords, fallback: Self.defaultEveningWords)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case nextDayWords, dayWords, dayProgressWords
+        case connectorWords, timeConnectorWords, matchWords
+        case noChangeWords, blockWords, ignoreWords, preventWords
+        case morningWords, earlyWords
+        case noonWords, afternoonWords
+        case eveningWords, nightWords
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        nextDayWords = Self.normalizedWords(
+            try container.decodeStringArrayFromPossibleKeys([.nextDayWords, .dayWords, .dayProgressWords]),
+            fallback: Self.defaultNextDayWords
+        )
+        connectorWords = Self.normalizedWords(
+            try container.decodeStringArrayFromPossibleKeys([.connectorWords, .timeConnectorWords, .matchWords]),
+            fallback: Self.defaultConnectorWords
+        )
+        noChangeWords = Self.normalizedWords(
+            try container.decodeStringArrayFromPossibleKeys([.noChangeWords, .blockWords, .ignoreWords, .preventWords]),
+            fallback: Self.defaultNoChangeWords
+        )
+        morningWords = Self.normalizedWords(
+            try container.decodeStringArrayFromPossibleKeys([.morningWords, .earlyWords]),
+            fallback: Self.defaultMorningWords
+        )
+        noonWords = Self.normalizedWords(
+            try container.decodeStringArrayFromPossibleKeys([.noonWords, .afternoonWords]),
+            fallback: Self.defaultNoonWords
+        )
+        eveningWords = Self.normalizedWords(
+            try container.decodeStringArrayFromPossibleKeys([.eveningWords, .nightWords]),
+            fallback: Self.defaultEveningWords
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(nextDayWords, forKey: .nextDayWords)
+        try container.encode(connectorWords, forKey: .connectorWords)
+        try container.encode(noChangeWords, forKey: .noChangeWords)
+        try container.encode(morningWords, forKey: .morningWords)
+        try container.encode(noonWords, forKey: .noonWords)
+        try container.encode(eveningWords, forKey: .eveningWords)
+    }
+
+    private static func normalizedWords(_ words: [String]?, fallback: [String]) -> [String] {
+        var seen = Set<String>()
+        let normalized = (words ?? [])
+            .flatMap { $0.split(whereSeparator: { "\n,，、;；|/／".contains($0) }).map(String.init) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { word in
+                let key = word.folding(options: [.widthInsensitive, .caseInsensitive], locale: nil)
+                guard !seen.contains(key) else { return false }
+                seen.insert(key)
+                return true
+            }
+        return normalized.isEmpty ? fallback : normalized
+    }
+}
+
 struct TimeTrackingConfig: Codable, Hashable {
     var enabled: Bool = true
-    var day: Int = 1
-    var period: String = "早上"
-    var autoAdvanceRounds: Int = 3
+    var currentDayNumber: Int = 1
+    var currentPeriod: String = TimeTrackingPeriod.morning.rawValue
+    var currentYear: Int = Calendar.current.component(.year, from: Date())
+    var currentMonth: Int = max(1, Calendar.current.component(.month, from: Date()))
+    var currentDate: Int = max(1, Calendar.current.component(.day, from: Date()))
+    var autoPeriod = TimeTrackingAutoPeriodConfig()
+    var config = TimeTrackingRulesConfig()
     var keepTimeDirective: String = "{保持時間}"
+    var updatedAt: Date = Date()
+
+    var day: Int {
+        get { currentDayNumber }
+        set { currentDayNumber = max(1, newValue) }
+    }
+
+    var period: String {
+        get { currentPeriodValue.title }
+        set { currentPeriod = TimeTrackingPeriod.normalized(newValue).rawValue }
+    }
+
+    var autoAdvanceRounds: Int {
+        get { autoPeriod.roundsPerPeriod }
+        set { autoPeriod.roundsPerPeriod = max(1, newValue) }
+    }
+
+    var currentPeriodValue: TimeTrackingPeriod {
+        get { TimeTrackingPeriod.normalized(currentPeriod) }
+        set { currentPeriod = newValue.rawValue }
+    }
 
     init(
         enabled: Bool = true,
         day: Int = 1,
-        period: String = "早上",
+        period: String = TimeTrackingPeriod.morning.rawValue,
         autoAdvanceRounds: Int = 3,
         keepTimeDirective: String = "{保持時間}"
     ) {
         self.enabled = enabled
-        self.day = day
-        self.period = period
-        self.autoAdvanceRounds = autoAdvanceRounds
+        currentDayNumber = max(1, day)
+        currentPeriod = TimeTrackingPeriod.normalized(period).rawValue
+        autoPeriod = TimeTrackingAutoPeriodConfig(enabled: false, roundsPerPeriod: autoAdvanceRounds)
         self.keepTimeDirective = keepTimeDirective
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, currentDayNumber, dayNumber, day
+        case currentPeriod, period, timeOfDay
+        case currentYear, year
+        case currentMonth, month, startMonth
+        case currentDate, date, dayOfMonth, startDate
+        case autoPeriod, autoTime, autoSwitch, autoAdvanceRounds
+        case config, rules
+        case keepTimeDirective, updatedAt
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        day = try container.decodeIfPresent(Int.self, forKey: .day) ?? 1
-        period = try container.decodeIfPresent(String.self, forKey: .period) ?? "早上"
-        autoAdvanceRounds = try container.decodeIfPresent(Int.self, forKey: .autoAdvanceRounds) ?? 3
+        currentDayNumber = max(1, try container.decodeIntFromPossibleKeys([.currentDayNumber, .dayNumber, .day]) ?? 1)
+        currentPeriod = TimeTrackingPeriod.normalized(
+            try container.decodeStringFromPossibleKeys([.currentPeriod, .period, .timeOfDay])
+        ).rawValue
+        let fallbackYear = Calendar.current.component(.year, from: Date())
+        currentYear = max(1, try container.decodeIntFromPossibleKeys([.currentYear, .year]) ?? fallbackYear)
+        let decodedMonth = try container.decodeIntFromPossibleKeys([.currentMonth, .month, .startMonth])
+        let decodedDate = try container.decodeIntFromPossibleKeys([.currentDate, .date, .dayOfMonth, .startDate])
+        currentMonth = min(12, max(1, decodedMonth ?? Calendar.current.component(.month, from: Date())))
+        currentDate = min(Self.daysInMonth(year: currentYear, month: currentMonth), max(1, decodedDate ?? Calendar.current.component(.day, from: Date())))
+        if let decodedAuto = try container.decodeIfPresent(TimeTrackingAutoPeriodConfig.self, forKey: .autoPeriod) ??
+            container.decodeIfPresent(TimeTrackingAutoPeriodConfig.self, forKey: .autoTime) ??
+            container.decodeIfPresent(TimeTrackingAutoPeriodConfig.self, forKey: .autoSwitch) {
+            autoPeriod = decodedAuto
+        } else {
+            autoPeriod = TimeTrackingAutoPeriodConfig(
+                enabled: false,
+                roundsPerPeriod: try container.decodeIfPresent(Int.self, forKey: .autoAdvanceRounds) ?? 3
+            )
+        }
+        config = try container.decodeIfPresent(TimeTrackingRulesConfig.self, forKey: .config) ??
+            container.decodeIfPresent(TimeTrackingRulesConfig.self, forKey: .rules) ??
+            TimeTrackingRulesConfig()
         keepTimeDirective = try container.decodeIfPresent(String.self, forKey: .keepTimeDirective) ?? "{保持時間}"
+        if let date = try? container.decode(Date.self, forKey: .updatedAt) {
+            updatedAt = date
+        } else if let rawDate = try container.decodeIfPresent(String.self, forKey: .updatedAt),
+                  let date = ISO8601DateFormatter().date(from: rawDate) {
+            updatedAt = date
+        } else {
+            updatedAt = Date()
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(currentDayNumber, forKey: .currentDayNumber)
+        try container.encode(currentPeriod, forKey: .currentPeriod)
+        try container.encode(currentYear, forKey: .currentYear)
+        try container.encode(currentMonth, forKey: .currentMonth)
+        try container.encode(currentDate, forKey: .currentDate)
+        try container.encode(autoPeriod, forKey: .autoPeriod)
+        try container.encode(config, forKey: .config)
+        try container.encode(keepTimeDirective, forKey: .keepTimeDirective)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+
+    private static func daysInMonth(year: Int, month: Int) -> Int {
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        let calendar = Calendar(identifier: .gregorian)
+        let date = calendar.date(from: components) ?? Date()
+        return calendar.range(of: .day, in: .month, for: date)?.count ?? 31
     }
 }
 
@@ -842,13 +1487,206 @@ struct NovelAIPromptSnippet: Codable, Identifiable, Hashable {
     var name: String = ""
     var content: String = ""
     var enabled: Bool = true
+    var min: Int = 1
+    var max: Int = 1
+    var squareEnabled: Bool = false
+    var squareMax: Int = 0
+    var curlyEnabled: Bool = false
+    var curlyMax: Int = 0
+    var weightEnabled: Bool = false
+    var weightMin: Double = 0
+    var weightMax: Double = 0
+    var weightBias: Double = 0
+
+    init(
+        id: String = UUID().uuidString,
+        name: String = "",
+        content: String = "",
+        enabled: Bool = true,
+        min: Int = 1,
+        max: Int = 1,
+        squareEnabled: Bool = false,
+        squareMax: Int = 0,
+        curlyEnabled: Bool = false,
+        curlyMax: Int = 0,
+        weightEnabled: Bool = false,
+        weightMin: Double = 0,
+        weightMax: Double = 0,
+        weightBias: Double = 0
+    ) {
+        self.id = id
+        self.name = name
+        self.content = content
+        self.enabled = enabled
+        self.min = Swift.max(0, min)
+        self.max = Swift.max(self.min, max)
+        self.squareEnabled = squareEnabled
+        self.squareMax = Swift.max(0, squareMax)
+        self.curlyEnabled = curlyEnabled
+        self.curlyMax = Swift.max(0, curlyMax)
+        self.weightEnabled = weightEnabled
+        self.weightMin = Swift.max(0, weightMin)
+        self.weightMax = Swift.max(self.weightMin, weightMax)
+        self.weightBias = Swift.max(self.weightMin, Swift.min(self.weightMax, weightBias))
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, title, key, content, prompt, text, randomText, randomItems, random
+        case choices, enabled, min, max, minPick, maxPick, pickMin, pickMax
+        case squareEnabled, squareMax, curlyEnabled, curlyMax
+        case weightEnabled, weightMin, weightMax, weightBias
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        name = try container.decodeStringFromPossibleKeys([.name, .title, .key]) ?? ""
+        content = try container.decodeStringFromPossibleKeys([.content, .prompt, .text, .randomText, .randomItems, .random, .choices]) ?? ""
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        let decodedMin = try container.decodeIntFromPossibleKeys([.min, .minPick, .pickMin]) ?? 1
+        let decodedMax = try container.decodeIntFromPossibleKeys([.max, .maxPick, .pickMax]) ?? Swift.max(1, decodedMin)
+        min = Swift.max(0, decodedMin)
+        max = Swift.max(min, decodedMax)
+        squareEnabled = try container.decodeIfPresent(Bool.self, forKey: .squareEnabled) ?? false
+        squareMax = Swift.max(0, try container.decodeIfPresent(Int.self, forKey: .squareMax) ?? 0)
+        curlyEnabled = try container.decodeIfPresent(Bool.self, forKey: .curlyEnabled) ?? false
+        curlyMax = Swift.max(0, try container.decodeIfPresent(Int.self, forKey: .curlyMax) ?? 0)
+        weightEnabled = try container.decodeIfPresent(Bool.self, forKey: .weightEnabled) ?? false
+        weightMin = Swift.max(0, try container.decodeIfPresent(Double.self, forKey: .weightMin) ?? 0)
+        weightMax = Swift.max(weightMin, try container.decodeIfPresent(Double.self, forKey: .weightMax) ?? weightMin)
+        weightBias = Swift.max(weightMin, Swift.min(weightMax, try container.decodeIfPresent(Double.self, forKey: .weightBias) ?? ((weightMin + weightMax) / 2)))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(content, forKey: .content)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(min, forKey: .min)
+        try container.encode(max, forKey: .max)
+        try container.encode(squareEnabled, forKey: .squareEnabled)
+        try container.encode(squareMax, forKey: .squareMax)
+        try container.encode(curlyEnabled, forKey: .curlyEnabled)
+        try container.encode(curlyMax, forKey: .curlyMax)
+        try container.encode(weightEnabled, forKey: .weightEnabled)
+        try container.encode(weightMin, forKey: .weightMin)
+        try container.encode(weightMax, forKey: .weightMax)
+        try container.encode(weightBias, forKey: .weightBias)
+    }
+}
+
+struct NovelAICharacterPositionCell: Identifiable, Hashable {
+    var row: Int
+    var col: Int
+
+    var id: String { "\(row)-\(col)" }
+    var label: String { "R\(row) C\(col)" }
+    var buttonTitle: String { "\(row),\(col)" }
+    var x: Double { Double(col - 1) / 4 }
+    var y: Double { Double(row - 1) / 4 }
+
+    static let allCells: [NovelAICharacterPositionCell] = (1...5).flatMap { row in
+        (1...5).map { col in
+            NovelAICharacterPositionCell(row: row, col: col)
+        }
+    }
+
+    init(row: Int, col: Int) {
+        self.row = min(5, max(1, row))
+        self.col = min(5, max(1, col))
+    }
+
+    init(x: Double, y: Double) {
+        let col = Int((min(1, max(0, x)) * 4).rounded()) + 1
+        let row = Int((min(1, max(0, y)) * 4).rounded()) + 1
+        self.init(row: row, col: col)
+    }
 }
 
 struct NovelAICharacterPrompt: Codable, Identifiable, Hashable {
     var id: String = UUID().uuidString
     var name: String = "角色"
     var prompt: String = ""
+    var negativePrompt: String = ""
     var enabled: Bool = true
+    var x: Double = 0.5
+    var y: Double = 0.5
+
+    init(
+        id: String = UUID().uuidString,
+        name: String = "角色",
+        prompt: String = "",
+        negativePrompt: String = "",
+        enabled: Bool = true,
+        x: Double = 0.5,
+        y: Double = 0.5
+    ) {
+        self.id = id
+        self.name = name
+        self.prompt = prompt
+        self.negativePrompt = negativePrompt
+        self.enabled = enabled
+        self.x = min(1, max(0, x))
+        self.y = min(1, max(0, y))
+    }
+
+    var positionCell: NovelAICharacterPositionCell {
+        NovelAICharacterPositionCell(x: x, y: y)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, title
+        case prompt, char_caption, caption
+        case negativePrompt, negative_prompt, uc
+        case enabled, x, y, center, centers
+    }
+
+    enum CenterCodingKeys: String, CodingKey {
+        case x, y
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        name = try container.decodeStringFromPossibleKeys([.name, .title]) ?? "角色"
+        prompt = try container.decodeStringFromPossibleKeys([.prompt, .char_caption, .caption]) ?? ""
+        negativePrompt = try container.decodeStringFromPossibleKeys([.negativePrompt, .negative_prompt, .uc]) ?? ""
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+
+        let center = try Self.decodeCenter(from: container)
+        let decodedX = try container.decodeDoubleFromPossibleKeys([.x]) ?? center?.x ?? 0.5
+        let decodedY = try container.decodeDoubleFromPossibleKeys([.y]) ?? center?.y ?? 0.5
+        x = min(1, max(0, decodedX))
+        y = min(1, max(0, decodedY))
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encode(negativePrompt, forKey: .negativePrompt)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(x, forKey: .x)
+        try container.encode(y, forKey: .y)
+    }
+
+    private static func decodeCenter(from container: KeyedDecodingContainer<CodingKeys>) throws -> (x: Double, y: Double)? {
+        if var centers = try? container.nestedUnkeyedContainer(forKey: .centers),
+           !centers.isAtEnd {
+            let center = try centers.nestedContainer(keyedBy: CenterCodingKeys.self)
+            let x = try center.decodeIfPresent(Double.self, forKey: .x) ?? 0.5
+            let y = try center.decodeIfPresent(Double.self, forKey: .y) ?? 0.5
+            return (x, y)
+        }
+        if let center = try? container.nestedContainer(keyedBy: CenterCodingKeys.self, forKey: .center) {
+            let x = try center.decodeIfPresent(Double.self, forKey: .x) ?? 0.5
+            let y = try center.decodeIfPresent(Double.self, forKey: .y) ?? 0.5
+            return (x, y)
+        }
+        return nil
+    }
 }
 
 struct NovelAIReferenceImage: Codable, Identifiable, Hashable {
@@ -921,11 +1759,13 @@ struct NovelAIStudioSettings: Codable, Hashable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         modelDescription = try container.decodeIfPresent(String.self, forKey: .modelDescription) ?? ""
-        basePrompt = try container.decodeIfPresent(String.self, forKey: .basePrompt) ?? ""
+        basePrompt = try container.decodeStringFromPossibleKeys([.basePrompt, .prompt, .promptTemplate, .prompt_template]) ?? ""
         fixedSnippets = try container.decodeIfPresent([NovelAIPromptSnippet].self, forKey: .fixedSnippets) ?? []
         randomSnippets = try container.decodeIfPresent([NovelAIPromptSnippet].self, forKey: .randomSnippets) ?? []
-        negativePrompt = try container.decodeIfPresent(String.self, forKey: .negativePrompt) ?? "lowres, bad anatomy"
-        characterPrompts = try container.decodeIfPresent([NovelAICharacterPrompt].self, forKey: .characterPrompts) ?? []
+        negativePrompt = try container.decodeStringFromPossibleKeys([.negativePrompt, .negative_prompt, .uc]) ?? "lowres, bad anatomy"
+        characterPrompts = try container.decodeIfPresent([NovelAICharacterPrompt].self, forKey: .characterPrompts) ??
+            (try container.decodeIfPresent([NovelAICharacterPrompt].self, forKey: .characters) ??
+                (try container.decodeIfPresent([NovelAICharacterPrompt].self, forKey: .character_prompts) ?? []))
         vibeTransferImages = try container.decodeIfPresent([NovelAIReferenceImage].self, forKey: .vibeTransferImages) ?? []
         imageToImageImageData = try container.decodeIfPresent(Data.self, forKey: .imageToImageImageData)
         imageToImageStrength = try container.decodeIfPresent(Double.self, forKey: .imageToImageStrength) ?? 0.7
@@ -938,6 +1778,42 @@ struct NovelAIStudioSettings: Codable, Hashable {
         loopCount = try container.decodeIfPresent(Int.self, forKey: .loopCount) ?? 1
         metadataDraft = try container.decodeIfPresent(String.self, forKey: .metadataDraft) ?? ""
     }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(modelDescription, forKey: .modelDescription)
+        try container.encode(basePrompt, forKey: .basePrompt)
+        try container.encode(fixedSnippets, forKey: .fixedSnippets)
+        try container.encode(randomSnippets, forKey: .randomSnippets)
+        try container.encode(negativePrompt, forKey: .negativePrompt)
+        try container.encode(characterPrompts, forKey: .characterPrompts)
+        try container.encode(vibeTransferImages, forKey: .vibeTransferImages)
+        try container.encodeIfPresent(imageToImageImageData, forKey: .imageToImageImageData)
+        try container.encode(imageToImageStrength, forKey: .imageToImageStrength)
+        try container.encode(imageToImageNoise, forKey: .imageToImageNoise)
+        try container.encode(preciseReferenceImages, forKey: .preciseReferenceImages)
+        try container.encode(sizePreset, forKey: .sizePreset)
+        try container.encode(customWidth, forKey: .customWidth)
+        try container.encode(customHeight, forKey: .customHeight)
+        try container.encode(imageSettings, forKey: .imageSettings)
+        try container.encode(loopCount, forKey: .loopCount)
+        try container.encode(metadataDraft, forKey: .metadataDraft)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case modelDescription
+        case basePrompt, prompt, promptTemplate, prompt_template
+        case fixedSnippets, randomSnippets
+        case negativePrompt, negative_prompt, uc
+        case characterPrompts, characters, character_prompts
+        case vibeTransferImages
+        case imageToImageImageData, imageToImageStrength, imageToImageNoise
+        case preciseReferenceImages
+        case sizePreset, customWidth, customHeight
+        case imageSettings
+        case loopCount
+        case metadataDraft
+    }
 }
 
 struct AppDefaultsSnapshot: Codable, Hashable {
@@ -946,6 +1822,7 @@ struct AppDefaultsSnapshot: Codable, Hashable {
     var roleCards: [RoleCard] = []
     var activeRoleCardId: String = ""
     var activeAssistantMode: String = ""
+    var characterCardCreationAssistantPrompt: String = AssistantCard.defaultPrompt
     var promptModes: [PromptModeConfig] = AppState.defaultPromptModes()
     var timeTracking = TimeTrackingConfig()
     var novelAIStudioSettings = NovelAIStudioSettings()
@@ -960,6 +1837,7 @@ struct AppDefaultsSnapshot: Codable, Hashable {
         roleCards = state.roleCards
         activeRoleCardId = state.activeRoleCardId
         activeAssistantMode = state.activeAssistantMode
+        characterCardCreationAssistantPrompt = state.characterCardCreationAssistantPrompt
         promptModes = state.promptModes
         timeTracking = state.timeTracking
         novelAIStudioSettings = state.novelAIStudioSettings
@@ -973,7 +1851,8 @@ struct AppDefaultsSnapshot: Codable, Hashable {
         apiSettings = try container.decodeIfPresent(APISettings.self, forKey: .apiSettings) ?? APISettings()
         roleCards = try container.decodeIfPresent([RoleCard].self, forKey: .roleCards) ?? []
         activeRoleCardId = try container.decodeIfPresent(String.self, forKey: .activeRoleCardId) ?? ""
-        activeAssistantMode = try container.decodeIfPresent(String.self, forKey: .activeAssistantMode) ?? ""
+        activeAssistantMode = AssistantCard.normalizedMode(try container.decodeIfPresent(String.self, forKey: .activeAssistantMode))
+        characterCardCreationAssistantPrompt = try container.decodeIfPresent(String.self, forKey: .characterCardCreationAssistantPrompt) ?? AssistantCard.defaultPrompt
         promptModes = try container.decodeIfPresent([PromptModeConfig].self, forKey: .promptModes) ?? AppState.defaultPromptModes()
         timeTracking = try container.decodeIfPresent(TimeTrackingConfig.self, forKey: .timeTracking) ?? TimeTrackingConfig()
         novelAIStudioSettings = try container.decodeIfPresent(NovelAIStudioSettings.self, forKey: .novelAIStudioSettings) ?? NovelAIStudioSettings()
@@ -988,6 +1867,7 @@ struct AppState: Codable, Hashable {
     var roleCards: [RoleCard] = []
     var activeRoleCardId: String = ""
     var activeAssistantMode: String = ""
+    var characterCardCreationAssistantPrompt: String = AssistantCard.defaultPrompt
     var promptModes: [PromptModeConfig] = AppState.defaultPromptModes()
     var conversation: [ConversationMessage] = []
     var savedSessions: [SavedSession] = []
@@ -995,11 +1875,16 @@ struct AppState: Codable, Hashable {
     var timeTracking = TimeTrackingConfig()
     var novelAIAlbum: [NovelAIAlbumItem] = []
     var novelAIStudioSettings = NovelAIStudioSettings()
+    var uiLanguage: UILanguageMode = .traditional
     var localDefaults: AppDefaultsSnapshot?
     var updatedAt: Date = Date()
 
     var activeRoleCard: RoleCard? {
         roleCards.first { $0.id == activeRoleCardId }
+    }
+
+    var activeAssistantCard: AssistantCard? {
+        AssistantCard.card(for: activeAssistantMode)
     }
 
     static func defaultPromptModes() -> [PromptModeConfig] {
@@ -1018,7 +1903,9 @@ struct AppState: Codable, Hashable {
         apiSettings = try container.decodeIfPresent(APISettings.self, forKey: .apiSettings) ?? APISettings()
         roleCards = try container.decodeIfPresent([RoleCard].self, forKey: .roleCards) ?? []
         activeRoleCardId = try container.decodeIfPresent(String.self, forKey: .activeRoleCardId) ?? ""
-        activeAssistantMode = try container.decodeIfPresent(String.self, forKey: .activeAssistantMode) ?? ""
+        activeAssistantMode = AssistantCard.normalizedMode(try container.decodeIfPresent(String.self, forKey: .activeAssistantMode))
+        characterCardCreationAssistantPrompt = try container.decodeIfPresent(String.self, forKey: .characterCardCreationAssistantPrompt) ??
+            (try container.decodeIfPresent(String.self, forKey: .characterCardCreationAssistantPromptLegacy) ?? AssistantCard.defaultPrompt)
         promptModes = try container.decodeIfPresent([PromptModeConfig].self, forKey: .promptModes) ?? AppState.defaultPromptModes()
         conversation = try container.decodeIfPresent([ConversationMessage].self, forKey: .conversation) ?? []
         savedSessions = try container.decodeIfPresent([SavedSession].self, forKey: .savedSessions) ?? []
@@ -1026,8 +1913,46 @@ struct AppState: Codable, Hashable {
         timeTracking = try container.decodeIfPresent(TimeTrackingConfig.self, forKey: .timeTracking) ?? TimeTrackingConfig()
         novelAIAlbum = try container.decodeIfPresent([NovelAIAlbumItem].self, forKey: .novelAIAlbum) ?? []
         novelAIStudioSettings = try container.decodeIfPresent(NovelAIStudioSettings.self, forKey: .novelAIStudioSettings) ?? NovelAIStudioSettings()
+        uiLanguage = try container.decodeIfPresent(UILanguageMode.self, forKey: .uiLanguage) ?? .traditional
         localDefaults = try container.decodeIfPresent(AppDefaultsSnapshot.self, forKey: .localDefaults)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        if !activeAssistantMode.isEmpty {
+            activeRoleCardId = ""
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(userProfile, forKey: .userProfile)
+        try container.encode(apiSettings, forKey: .apiSettings)
+        try container.encode(roleCards, forKey: .roleCards)
+        try container.encode(activeRoleCardId, forKey: .activeRoleCardId)
+        try container.encode(activeAssistantMode, forKey: .activeAssistantMode)
+        try container.encode(characterCardCreationAssistantPrompt, forKey: .characterCardCreationAssistantPrompt)
+        try container.encode(promptModes, forKey: .promptModes)
+        try container.encode(conversation, forKey: .conversation)
+        try container.encode(savedSessions, forKey: .savedSessions)
+        try container.encode(aiLogs, forKey: .aiLogs)
+        try container.encode(timeTracking, forKey: .timeTracking)
+        try container.encode(novelAIAlbum, forKey: .novelAIAlbum)
+        try container.encode(novelAIStudioSettings, forKey: .novelAIStudioSettings)
+        try container.encode(uiLanguage, forKey: .uiLanguage)
+        try container.encodeIfPresent(localDefaults, forKey: .localDefaults)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case userProfile, apiSettings, roleCards, activeRoleCardId, activeAssistantMode
+        case characterCardCreationAssistantPrompt
+        case characterCardCreationAssistantPromptLegacy = "assistantPrompt"
+        case promptModes, conversation, savedSessions, aiLogs, timeTracking
+        case novelAIAlbum, novelAIStudioSettings, uiLanguage, localDefaults, updatedAt
+    }
+}
+
+private extension String {
+    func prefixString(_ maxLength: Int) -> String {
+        String(prefix(maxLength))
     }
 }
 
@@ -1041,6 +1966,72 @@ final class AppSnapshot {
         self.id = id
         self.payload = payload
         self.updatedAt = updatedAt
+    }
+}
+
+private extension KeyedDecodingContainer {
+    func decodeStringFromPossibleKeys(_ keys: [Key]) throws -> String? {
+        for key in keys {
+            if let value = try decodeIfPresent(String.self, forKey: key) {
+                return value
+            }
+            if let values = try decodeIfPresent([String].self, forKey: key) {
+                return values.joined(separator: "\n")
+            }
+            if let intValue = try decodeIfPresent(Int.self, forKey: key) {
+                return String(intValue)
+            }
+            if let doubleValue = try decodeIfPresent(Double.self, forKey: key) {
+                return String(doubleValue)
+            }
+        }
+        return nil
+    }
+
+    func decodeStringArrayFromPossibleKeys(_ keys: [Key]) throws -> [String]? {
+        for key in keys {
+            if let values = try decodeIfPresent([String].self, forKey: key) {
+                return values
+            }
+            if let value = try decodeIfPresent(String.self, forKey: key) {
+                return value
+                    .split(whereSeparator: { "\n,，、;；|/／".contains($0) })
+                    .map(String.init)
+            }
+        }
+        return nil
+    }
+
+    func decodeIntFromPossibleKeys(_ keys: [Key]) throws -> Int? {
+        for key in keys {
+            if let value = try decodeIfPresent(Int.self, forKey: key) {
+                return value
+            }
+            if let value = try decodeIfPresent(Double.self, forKey: key) {
+                return Int(value)
+            }
+            if let value = try decodeIfPresent(String.self, forKey: key),
+               let intValue = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return intValue
+            }
+        }
+        return nil
+    }
+
+    func decodeDoubleFromPossibleKeys(_ keys: [Key]) throws -> Double? {
+        for key in keys {
+            if let value = try decodeIfPresent(Double.self, forKey: key) {
+                return value
+            }
+            if let value = try decodeIfPresent(Int.self, forKey: key) {
+                return Double(value)
+            }
+            if let value = try decodeIfPresent(String.self, forKey: key),
+               let doubleValue = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return doubleValue
+            }
+        }
+        return nil
     }
 }
 

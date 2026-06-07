@@ -22,6 +22,10 @@ enum AppTab: String, CaseIterable, Identifiable {
         }
     }
 
+    func title(in language: UILanguageMode) -> String {
+        UIChineseTextConverter.convert(title, language: language)
+    }
+
     var systemImage: String {
         switch self {
         case .chat: "text.bubble.fill"
@@ -82,6 +86,10 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .task {
             store.attach(modelContext: modelContext)
+            UIChineseTextConverter.activeLanguage = store.state.uiLanguage
+        }
+        .onChange(of: store.state.uiLanguage) { _, language in
+            UIChineseTextConverter.activeLanguage = language
         }
     }
 }
@@ -178,6 +186,7 @@ struct VNGlassCard<Content: View>: View {
 
 struct VisualNovelTabBar: View {
     @Binding var selectedTab: AppTab
+    @EnvironmentObject private var store: TimeTavernStore
 
     var body: some View {
         HStack(spacing: 4) {
@@ -190,7 +199,7 @@ struct VisualNovelTabBar: View {
                     VStack(spacing: 4) {
                         Image(systemName: tab.systemImage)
                             .font(.system(size: 16, weight: .semibold))
-                        Text(tab.title)
+                        Text(tab.title(in: store.state.uiLanguage))
                             .font(.caption2.weight(.semibold))
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
@@ -231,6 +240,8 @@ struct ChatView: View {
     @State private var showRunTime = false
     @State private var replayMessage: ConversationMessage?
     @State private var replayText = ""
+    @State private var editingMessage: ConversationMessage?
+    @State private var editText = ""
 
     var body: some View {
         NavigationStack {
@@ -258,9 +269,24 @@ struct ChatView: View {
                                         MessageBubble(message: message)
                                             .id(message.id)
                                             .contextMenu {
-                                                Button("從此分支重跑") {
+                                                Button(uiStatic("編輯內容")) {
+                                                    editingMessage = message
+                                                    editText = message.content
+                                                }
+                                                Button(uiStatic("從此分支重跑")) {
                                                     replayMessage = message
                                                     replayText = message.content
+                                                }
+                                                if message.role == .assistant {
+                                                    Button(uiStatic("標記喜歡")) {
+                                                        store.setMessageFeedback(id: message.id, feedback: "positive")
+                                                    }
+                                                    Button(uiStatic("標記不喜歡")) {
+                                                        store.setMessageFeedback(id: message.id, feedback: "negative")
+                                                    }
+                                                    Button(uiStatic("清除評價")) {
+                                                        store.setMessageFeedback(id: message.id, feedback: "")
+                                                    }
                                                 }
                                             }
                                     }
@@ -299,15 +325,36 @@ struct ChatView: View {
                             .frame(minHeight: 180)
                     }
                     .visualNovelListChrome()
-                    .navigationTitle("分支重跑")
+                    .navigationTitle(uiStatic("分支重跑"))
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("取消") { replayMessage = nil }
+                            Button(uiStatic("取消")) { replayMessage = nil }
                         }
                         ToolbarItem(placement: .confirmationAction) {
-                            Button("重跑") {
+                            Button(uiStatic("重跑")) {
                                 store.replay(from: message, with: replayText)
                                 replayMessage = nil
+                            }
+                        }
+                    }
+                }
+            }
+            .sheet(item: $editingMessage) { message in
+                NavigationStack {
+                    Form {
+                        TextEditor(text: $editText)
+                            .frame(minHeight: 180)
+                    }
+                    .visualNovelListChrome()
+                    .navigationTitle(uiStatic("編輯訊息"))
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button(uiStatic("取消")) { editingMessage = nil }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button(uiStatic("保存")) {
+                                store.updateMessage(id: message.id, content: editText)
+                                editingMessage = nil
                             }
                         }
                     }
@@ -339,9 +386,9 @@ struct ChatSceneHeader: View {
             }
             Spacer(minLength: 8)
             HStack(spacing: 4) {
-                HeaderIconButton(systemImage: "doc.text.magnifyingglass", action: showModelContent, label: "模型內容")
-                HeaderIconButton(systemImage: "forward.frame.fill", action: showRunTime, label: "自動推演")
-                HeaderIconButton(systemImage: "arrow.clockwise", action: regenerate, label: "重新生成")
+                HeaderIconButton(systemImage: "doc.text.magnifyingglass", action: showModelContent, label: uiStatic("模型內容"))
+                HeaderIconButton(systemImage: "forward.frame.fill", action: showRunTime, label: uiStatic("自動推演"))
+                HeaderIconButton(systemImage: "arrow.clockwise", action: regenerate, label: uiStatic("重新生成"))
                 HeaderIconButton(systemImage: "waveform.path.ecg", action: showLogs, label: "AI Logs")
             }
             .padding(5)
@@ -378,7 +425,9 @@ struct CharacterStatusCard: View {
     @State private var appeared = false
 
     var activeCard: RoleCard? { store.state.activeRoleCard }
-    var ready: Bool { activeCard != nil }
+    var activeAssistantCard: AssistantCard? { store.state.activeAssistantCard }
+    var ready: Bool { activeCard != nil || activeAssistantCard != nil }
+    var displayName: String { activeCard?.name.nonEmpty ?? activeAssistantCard?.displayName ?? uiStatic("尚未開始角色卡") }
 
     static func statusTitle(isReady: Bool) -> String {
         isReady ? "Ready" : "Idle"
@@ -387,9 +436,12 @@ struct CharacterStatusCard: View {
     var body: some View {
         VNGlassCard(cornerRadius: 20, accentOpacity: 0.62) {
             HStack(spacing: 12) {
-                CharacterAvatarView(imageData: activeCard?.coverImageData)
+                CharacterAvatarView(
+                    imageData: activeCard?.coverImageData,
+                    fallbackSystemImage: activeAssistantCard == nil ? "moon.stars.fill" : "wand.and.stars"
+                )
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(activeCard?.name.nonEmpty ?? "尚未開始角色卡")
+                    Text(displayName)
                         .font(.headline.weight(.bold))
                         .foregroundStyle(VNTheme.accentSoft)
                         .lineLimit(1)
@@ -423,6 +475,7 @@ struct CharacterStatusCard: View {
 
 struct CharacterAvatarView: View {
     var imageData: Data?
+    var fallbackSystemImage: String = "moon.stars.fill"
 
     var body: some View {
         ZStack {
@@ -439,7 +492,7 @@ struct CharacterAvatarView: View {
                     .resizable()
                     .scaledToFill()
             } else {
-                Image(systemName: "moon.stars.fill")
+                Image(systemName: fallbackSystemImage)
                     .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(VNTheme.accentSoft)
             }
@@ -457,10 +510,10 @@ struct EmptyStoryHintCard: View {
     var body: some View {
         VNGlassCard(cornerRadius: 24, accentOpacity: 0.46) {
             VStack(spacing: 8) {
-                Text("尚未開始故事")
+                Text(uiStatic("尚未開始故事"))
                     .font(.title3.weight(.bold))
                     .foregroundStyle(.white)
-                Text("選擇角色卡或直接輸入內容開始。")
+                Text(uiStatic("選擇角色卡或直接輸入內容開始。"))
                     .font(.subheadline)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(VNTheme.textSecondary)
@@ -478,17 +531,38 @@ struct MessageBubble: View {
         HStack {
             if message.role == .user { Spacer(minLength: 40) }
             VStack(alignment: .leading, spacing: 6) {
-                Text(message.role == .user ? "你" : "角色")
+                Text(message.role == .user ? uiStatic("你") : uiStatic("角色"))
                     .font(.caption.bold())
                     .foregroundStyle(VNTheme.accentSoft)
                 if message.compressionNotice {
-                    Label("模型內容已更新", systemImage: "tray.and.arrow.down.fill")
+                    Label(uiStatic("模型內容已更新"), systemImage: "tray.and.arrow.down.fill")
                         .font(.caption)
                         .foregroundStyle(VNTheme.accentSoft)
                 }
-                Text(message.content.isEmpty ? "生成中..." : message.content)
+                Text(message.content.isEmpty ? uiStatic("生成中...") : message.content)
                     .textSelection(.enabled)
                     .foregroundStyle(.white)
+                if let imageData = message.imageData, let image = UIImage(data: imageData) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        )
+                        .frame(maxHeight: 260)
+                }
+                if !message.autoTimeWarning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Label(message.autoTimeWarning, systemImage: "clock.badge.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.accentSoft)
+                }
+                if !message.feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Label(message.feedback == "positive" ? uiStatic("喜歡") : uiStatic("不喜歡"), systemImage: message.feedback == "positive" ? "hand.thumbsup.fill" : "hand.thumbsdown.fill")
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.accentSoft)
+                }
             }
             .padding(12)
             .background(
@@ -518,7 +592,7 @@ struct VisualNovelComposer: View {
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 12) {
-            TextField("輸入對話", text: $store.composerText, axis: .vertical)
+            TextField(uiStatic("輸入對話"), text: $store.composerText, axis: .vertical)
                 .lineLimit(1...5)
                 .focused($inputFocused)
                 .font(.body)
@@ -573,7 +647,9 @@ struct VisualNovelComposer: View {
 struct CharactersView: View {
     @EnvironmentObject private var store: TimeTavernStore
     @State private var editingCard: RoleCard?
+    @State private var showAssistantPromptEditor = false
     @State private var query = ""
+    static let separatesRoleCardsAndAssistantCards = true
 
     var filteredCards: [RoleCard] {
         guard !query.isEmpty else { return store.state.roleCards }
@@ -588,26 +664,141 @@ struct CharactersView: View {
                         store.createRoleCard()
                         editingCard = store.state.roleCards.first
                     } label: {
-                        Label("建立角色卡", systemImage: "plus")
+                        Label(uiStatic("建立角色卡"), systemImage: "plus")
                     }
                 }
-                Section("角色卡") {
-                    ForEach(filteredCards) { card in
-                        RoleCardRow(card: card, isActive: card.id == store.state.activeRoleCardId)
-                            .swipeActions {
-                                Button("開始") { store.start(roleCard: card) }.tint(VNTheme.accent)
-                                Button("編輯") { editingCard = card }.tint(Color(red: 0.36, green: 0.42, blue: 1.0))
+                Section(uiStatic("助手卡")) {
+                    ForEach(AssistantCard.allCards) { assistantCard in
+                        VStack(alignment: .leading, spacing: 10) {
+                            AssistantCardRow(
+                                assistantCard: assistantCard,
+                                isActive: store.state.activeAssistantMode == assistantCard.id
+                            )
+                            HStack {
+                                Button {
+                                    store.start(assistantCard: assistantCard)
+                                } label: {
+                                    Label(uiStatic("啟用助手"), systemImage: "play.fill")
+                                }
+                                Button {
+                                    showAssistantPromptEditor = true
+                                } label: {
+                                    Label(uiStatic("編輯 Prompt"), systemImage: "square.and.pencil")
+                                }
                             }
-                            .onTapGesture { editingCard = card }
+                            .font(.caption.weight(.semibold))
+                        }
+                        .swipeActions {
+                            Button(uiStatic("啟用")) { store.start(assistantCard: assistantCard) }.tint(VNTheme.accent)
+                            Button("Prompt") { showAssistantPromptEditor = true }.tint(Color(red: 0.36, green: 0.42, blue: 1.0))
+                        }
+                        .contextMenu {
+                            Button(uiStatic("啟用助手")) { store.start(assistantCard: assistantCard) }
+                            Button(uiStatic("編輯助手 Prompt")) { showAssistantPromptEditor = true }
+                        }
                     }
-                    .onDelete(perform: store.deleteRoleCards)
+                }
+                Section(uiStatic("角色卡")) {
+                    if filteredCards.isEmpty {
+                        Text(store.state.roleCards.isEmpty ? uiStatic("尚無角色卡；可先使用上方建立卡助手。") : uiStatic("沒有符合搜尋的角色卡。"))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+                    } else {
+                        ForEach(filteredCards) { card in
+                            RoleCardRow(card: card, isActive: card.id == store.state.activeRoleCardId)
+                                .swipeActions {
+                                    Button(uiStatic("開始")) { store.start(roleCard: card) }.tint(VNTheme.accent)
+                                    Button(uiStatic("編輯")) { editingCard = card }.tint(Color(red: 0.36, green: 0.42, blue: 1.0))
+                                }
+                                .onTapGesture { editingCard = card }
+                        }
+                        .onDelete(perform: deleteFilteredRoleCards)
+                    }
                 }
             }
             .visualNovelListChrome()
-            .searchable(text: $query, prompt: "搜尋角色")
-            .navigationTitle("角色")
+            .searchable(text: $query, prompt: uiStatic("搜尋角色"))
+            .navigationTitle(uiStatic("角色"))
             .sheet(item: $editingCard) { card in
                 RoleCardEditorView(card: card)
+            }
+            .sheet(isPresented: $showAssistantPromptEditor) {
+                AssistantPromptEditorView()
+            }
+        }
+    }
+
+    private func deleteFilteredRoleCards(at offsets: IndexSet) {
+        let ids = offsets.compactMap { filteredCards.indices.contains($0) ? filteredCards[$0].id : nil }
+        let roleOffsets = IndexSet(ids.compactMap { id in store.state.roleCards.firstIndex { $0.id == id } })
+        store.deleteRoleCards(at: roleOffsets)
+    }
+}
+
+struct AssistantCardRow: View {
+    var assistantCard: AssistantCard
+    var isActive: Bool
+
+    var body: some View {
+        HStack {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(VNTheme.accent.opacity(0.20))
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(VNTheme.accentSoft)
+            }
+            .frame(width: 54, height: 54)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(assistantCard.displayName)
+                    .font(.headline)
+                Text(assistantCard.summary)
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
+                Text(assistantCard.detail)
+                    .font(.caption2)
+                    .foregroundStyle(VNTheme.textSecondary)
+            }
+            Spacer()
+            if isActive {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(VNTheme.accentSoft)
+            }
+        }
+    }
+}
+
+struct AssistantPromptEditorView: View {
+    @EnvironmentObject private var store: TimeTavernStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(uiStatic("建立卡助手 Prompt")) {
+                    Text(uiStatic("這會更新建立卡助手使用的 system prompt，保存後立即生效。可使用 {{user}} 代表稱呼，{{chur}} 代表助手卡名稱。"))
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
+                    TextEditor(text: $store.state.characterCardCreationAssistantPrompt)
+                        .frame(minHeight: 260)
+                }
+                Section {
+                    Button(uiStatic("還原預設 Prompt")) {
+                        store.resetCharacterCardCreationAssistantPrompt()
+                    }
+                }
+            }
+            .visualNovelListChrome()
+            .navigationTitle(uiStatic("助手 Prompt"))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(uiStatic("關閉")) { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(uiStatic("保存")) {
+                        store.persist()
+                        dismiss()
+                    }
+                }
             }
         }
     }
@@ -622,9 +813,9 @@ struct RoleCardRow: View {
             RoleCardCoverView(card: card, height: 54, cornerRadius: 14)
                 .frame(width: 54)
             VStack(alignment: .leading) {
-                Text(card.name.isEmpty ? "未命名角色" : card.name)
+                Text(card.name.isEmpty ? uiStatic("未命名角色") : card.name)
                     .font(.headline)
-                Text("\(card.mode.title) · 世界書 \(card.lorebooks.count) · 開場 \(card.openingDialogues.count)")
+                Text(uiStatic("\(card.mode.title) · 世界書 \(card.lorebooks.count) · 開場 \(card.openingDialogues.count)"))
                     .font(.caption)
                     .foregroundStyle(VNTheme.textSecondary)
             }
@@ -684,48 +875,56 @@ struct RoleCardEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @State var card: RoleCard
     @State private var coverPickerItem: PhotosPickerItem?
+    @State private var coverCropDraft: RoleCardCoverCropDraft?
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("基本") {
-                    TextField("名字", text: $card.name)
-                    Picker("模式", selection: $card.mode) {
+                Section(uiStatic("基本")) {
+                    TextField(uiStatic("名字"), text: $card.name)
+                    Picker(uiStatic("模式"), selection: $card.mode) {
                         ForEach(RoleCardMode.allCases) { mode in
                             Text(mode.title).tag(mode)
                         }
                     }
-                    Picker("Prompt 模式", selection: $card.promptModeId) {
+                    Picker(uiStatic("Prompt 模式"), selection: $card.promptModeId) {
                         ForEach(store.state.promptModes) { mode in
                             Text(mode.name).tag(mode.id)
                         }
                     }
                 }
-                Section("封面 / 預覽圖") {
+                Section(uiStatic("封面 / 預覽圖")) {
                     RoleCardCoverView(card: card, height: 220, cornerRadius: 20)
                     PhotosPicker(selection: $coverPickerItem, matching: .images) {
-                        Label(card.coverImageData == nil ? "選擇預覽圖" : "更換預覽圖", systemImage: "photo")
+                        Label(card.coverImageData == nil ? uiStatic("選擇預覽圖") : uiStatic("更換預覽圖"), systemImage: "photo")
                     }
                     if card.coverImageData != nil || !card.coverImageDataURL.isEmpty {
+                        Button {
+                            if let data = card.coverImageData ?? Self.imageData(fromDataURL: card.coverImageDataURL) {
+                                coverCropDraft = RoleCardCoverCropDraft(imageData: data)
+                            }
+                        } label: {
+                            Label(uiStatic("裁切預覽圖"), systemImage: "crop")
+                        }
                         Button(role: .destructive) {
                             card.coverImageData = nil
                             card.coverImageDataURL = ""
                         } label: {
-                            Label("移除預覽圖", systemImage: "trash")
+                            Label(uiStatic("移除預覽圖"), systemImage: "trash")
                         }
                     }
-                    Picker("取景位置", selection: $card.coverPosition) {
+                    Picker(uiStatic("取景位置"), selection: $card.coverPosition) {
                         ForEach(RoleCardCoverPosition.allCases) { position in
                             Text(position.title).tag(position.rawValue)
                         }
                     }
                 }
-                Section("自定義內容") {
+                Section(uiStatic("自定義內容")) {
                     if card.customSections.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("尚未新增自定義內容")
+                            Text(uiStatic("尚未新增自定義內容"))
                                 .font(.headline)
-                            Text("新角色卡不再預設塞入欄位。需要角色設定、世界觀或規則時再新增。")
+                            Text(uiStatic("新角色卡不再預設塞入欄位。需要角色設定、世界觀或規則時再新增。"))
                                 .font(.caption)
                                 .foregroundStyle(VNTheme.textSecondary)
                         }
@@ -734,7 +933,7 @@ struct RoleCardEditorView: View {
                     ForEach($card.customSections) { $section in
                         VStack(alignment: .leading) {
                             HStack {
-                                Text(section.name.isEmpty ? "未命名欄位" : section.name)
+                                Text(section.name.isEmpty ? uiStatic("未命名欄位") : section.name)
                                     .font(.headline)
                                 Spacer()
                                 Button(role: .destructive) {
@@ -743,18 +942,18 @@ struct RoleCardEditorView: View {
                                     Image(systemName: "trash")
                                 }
                             }
-                            TextField("名稱", text: $section.name)
+                            TextField(uiStatic("名稱"), text: $section.name)
                             TextEditor(text: $section.content).frame(minHeight: 90)
-                            Toggle("啟用", isOn: $section.enabled)
+                            Toggle(uiStatic("啟用"), isOn: $section.enabled)
                         }
                     }
-                    Button("新增欄位") { card.customSections.append(CustomSection(name: "新欄位")) }
+                    Button(uiStatic("新增欄位")) { card.customSections.append(CustomSection(name: "新欄位")) }
                 }
-                Section("開場") {
+                Section(uiStatic("開場")) {
                     ForEach($card.openingDialogues) { $opening in
                         VStack(alignment: .leading) {
                             HStack {
-                                Text(opening.name.isEmpty ? "開場" : opening.name)
+                                Text(opening.name.isEmpty ? uiStatic("開場") : opening.name)
                                     .font(.headline)
                                 Spacer()
                                 Button(role: .destructive) {
@@ -763,17 +962,17 @@ struct RoleCardEditorView: View {
                                     Image(systemName: "trash")
                                 }
                             }
-                            TextField("標題", text: $opening.name)
+                            TextField(uiStatic("標題"), text: $opening.name)
                             TextEditor(text: $opening.content).frame(minHeight: 90)
                         }
                     }
-                    Button("新增開場") { card.openingDialogues.append(OpeningDialogue(name: "開場 \(card.openingDialogues.count + 1)")) }
+                    Button(uiStatic("新增開場")) { card.openingDialogues.append(OpeningDialogue(name: "開場 \(card.openingDialogues.count + 1)")) }
                 }
-                Section("世界書") {
+                Section(uiStatic("世界書")) {
                     ForEach($card.lorebooks) { $entry in
                         VStack(alignment: .leading) {
                             HStack {
-                                Text(entry.title.isEmpty ? "世界書" : entry.title)
+                                Text(entry.title.isEmpty ? uiStatic("世界書") : entry.title)
                                     .font(.headline)
                                 Spacer()
                                 Button(role: .destructive) {
@@ -782,32 +981,32 @@ struct RoleCardEditorView: View {
                                     Image(systemName: "trash")
                                 }
                             }
-                            TextField("標題", text: $entry.title)
-                            TextField("關鍵字，用逗號分隔", text: Binding(
+                            TextField(uiStatic("標題"), text: $entry.title)
+                            TextField(uiStatic("關鍵字，用逗號分隔"), text: Binding(
                                 get: { entry.keywords.joined(separator: ", ") },
                                 set: { entry.keywords = $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
                             ))
                             TextEditor(text: $entry.content).frame(minHeight: 90)
-                            Toggle("啟用", isOn: $entry.enabled)
+                            Toggle(uiStatic("啟用"), isOn: $entry.enabled)
                         }
                     }
-                    Button("新增世界書") { card.lorebooks.append(LorebookEntry(title: "世界書")) }
+                    Button(uiStatic("新增世界書")) { card.lorebooks.append(LorebookEntry(title: "世界書")) }
                 }
                 Section("JSON") {
                     Button {
                         store.exportRoleCardJSON(Self.normalizedForSave(card))
                     } label: {
-                        Label("匯出角色卡 JSON", systemImage: "square.and.arrow.up")
+                        Label(uiStatic("匯出角色卡 JSON"), systemImage: "square.and.arrow.up")
                     }
                     if let url = store.exportedJSONURL {
                         ShareLink(item: url) {
-                            Label("分享 JSON", systemImage: "paperplane")
+                            Label(uiStatic("分享 JSON"), systemImage: "paperplane")
                         }
                     }
                 }
             }
             .visualNovelListChrome()
-            .navigationTitle(card.name.isEmpty ? "角色卡" : card.name)
+            .navigationTitle(card.name.isEmpty ? uiStatic("角色卡") : card.name)
             .onChange(of: coverPickerItem) { _, newValue in
                 guard let newValue else { return }
                 Task {
@@ -819,12 +1018,20 @@ struct RoleCardEditorView: View {
                     }
                 }
             }
+            .sheet(item: $coverCropDraft) { draft in
+                RoleCardCoverCropEditor(imageData: draft.imageData) { croppedData in
+                    card.coverImageData = croppedData
+                    card.coverImageDataURL = Self.dataURL(for: croppedData, mimeType: "image/jpeg")
+                    card.coverPosition = RoleCardCoverPosition.centerCenter.rawValue
+                    coverCropDraft = nil
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(uiStatic("取消")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
+                    Button(uiStatic("保存")) {
                         card = Self.normalizedForSave(card)
                         store.update(roleCard: card)
                         dismiss()
@@ -848,6 +1055,12 @@ struct RoleCardEditorView: View {
 
     static func dataURL(for imageData: Data, mimeType: String = "image/jpeg") -> String {
         "data:\(mimeType);base64,\(imageData.base64EncodedString())"
+    }
+
+    static func imageData(fromDataURL dataURL: String) -> Data? {
+        guard let commaIndex = dataURL.firstIndex(of: ",") else { return nil }
+        let encoded = String(dataURL[dataURL.index(after: commaIndex)...])
+        return Data(base64Encoded: encoded)
     }
 
     static func cardByDeletingOpening(_ card: RoleCard, openingID: String) -> RoleCard {
@@ -875,41 +1088,344 @@ struct RoleCardEditorView: View {
     }
 }
 
+struct RoleCardCoverCropDraft: Identifiable {
+    let id = UUID()
+    var imageData: Data
+}
+
+struct RoleCardCoverCrop: Hashable {
+    var x: CGFloat
+    var y: CGFloat
+    var width: CGFloat
+    var height: CGFloat
+
+    static let defaultCrop = RoleCardCoverCrop(x: 0.12, y: 0.12, width: 0.76, height: 0.76)
+
+    func normalized() -> RoleCardCoverCrop {
+        let normalizedWidth = min(1, max(0.08, width))
+        let normalizedHeight = min(1, max(0.08, height))
+        return RoleCardCoverCrop(
+            x: min(max(0, x), 1 - normalizedWidth),
+            y: min(max(0, y), 1 - normalizedHeight),
+            width: normalizedWidth,
+            height: normalizedHeight
+        )
+    }
+}
+
+struct RoleCardCoverCropEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    var imageData: Data
+    var onApply: (Data) -> Void
+    @State private var crop = RoleCardCoverCrop.defaultCrop
+
+    static let supportsFreeCrop = true
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(uiStatic("裁切預覽")) {
+                    if let image = UIImage(data: imageData) {
+                        RoleCardCoverCropPreview(image: image, crop: crop)
+                            .frame(height: 280)
+                        Text(uiStatic("拖曳式裁切在網頁端完成；手機端以 X/Y/寬/高滑桿精準調整，同樣會輸出裁切後的 JPEG 預覽圖。"))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+                    } else {
+                        Text(uiStatic("圖片無法顯示。"))
+                            .foregroundStyle(.red)
+                    }
+                }
+                Section(uiStatic("裁切框")) {
+                    cropSlider(title: "X", value: \.x)
+                    cropSlider(title: "Y", value: \.y)
+                    cropSlider(title: "寬", value: \.width, range: 0.08...1)
+                    cropSlider(title: "高", value: \.height, range: 0.08...1)
+                    Button(uiStatic("重置裁切框")) {
+                        crop = .defaultCrop
+                    }
+                }
+            }
+            .visualNovelListChrome()
+            .navigationTitle(uiStatic("裁切預覽圖"))
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(uiStatic("取消")) { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(uiStatic("套用")) {
+                        guard let cropped = Self.cropImageData(imageData, crop: crop) else { return }
+                        onApply(cropped)
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func cropSlider(
+        title: String,
+        value keyPath: WritableKeyPath<RoleCardCoverCrop, CGFloat>,
+        range: ClosedRange<Double> = 0...1
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("\(title) \(Int(crop[keyPath: keyPath] * 100))%")
+                .font(.caption)
+                .foregroundStyle(VNTheme.textSecondary)
+            Slider(
+                value: Binding(
+                    get: { Double(crop[keyPath: keyPath]) },
+                    set: { next in
+                        crop[keyPath: keyPath] = CGFloat(next)
+                        crop = crop.normalized()
+                    }
+                ),
+                in: range,
+                step: 0.01
+            )
+        }
+    }
+
+    static func cropImageData(
+        _ imageData: Data,
+        crop: RoleCardCoverCrop,
+        maxSide: CGFloat = 760,
+        compressionQuality: CGFloat = 0.82
+    ) -> Data? {
+        guard let image = UIImage(data: imageData),
+              let cgImage = image.cgImage
+        else { return nil }
+        let normalized = crop.normalized()
+        let sourceSize = CGSize(width: cgImage.width, height: cgImage.height)
+        let sourceRect = CGRect(
+            x: normalized.x * sourceSize.width,
+            y: normalized.y * sourceSize.height,
+            width: normalized.width * sourceSize.width,
+            height: normalized.height * sourceSize.height
+        )
+            .integral
+            .intersection(CGRect(origin: .zero, size: sourceSize))
+        guard sourceRect.width >= 1, sourceRect.height >= 1,
+              let cropped = cgImage.cropping(to: sourceRect)
+        else { return nil }
+        let outputScale = min(1, maxSide / max(sourceRect.width, sourceRect.height))
+        let outputSize = CGSize(width: sourceRect.width * outputScale, height: sourceRect.height * outputScale)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: outputSize, format: format)
+        let output = renderer.image { _ in
+            UIImage(cgImage: cropped).draw(in: CGRect(origin: .zero, size: outputSize))
+        }
+        return output.jpegData(compressionQuality: compressionQuality)
+    }
+}
+
+struct RoleCardCoverCropPreview: View {
+    var image: UIImage
+    var crop: RoleCardCoverCrop
+
+    var body: some View {
+        GeometryReader { proxy in
+            let imageRect = fittedImageRect(imageSize: image.size, containerSize: proxy.size)
+            ZStack(alignment: .topLeading) {
+                Color.black.opacity(0.22)
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                cropOverlay(in: imageRect)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    private func cropOverlay(in imageRect: CGRect) -> some View {
+        let normalized = crop.normalized()
+        let rect = CGRect(
+            x: imageRect.minX + normalized.x * imageRect.width,
+            y: imageRect.minY + normalized.y * imageRect.height,
+            width: normalized.width * imageRect.width,
+            height: normalized.height * imageRect.height
+        )
+        return ZStack(alignment: .topLeading) {
+            Rectangle()
+                .fill(Color.black.opacity(0.38))
+                .mask {
+                    Rectangle()
+                        .overlay(alignment: .topLeading) {
+                            Rectangle()
+                                .frame(width: rect.width, height: rect.height)
+                                .offset(x: rect.minX, y: rect.minY)
+                                .blendMode(.destinationOut)
+                        }
+                }
+            Rectangle()
+                .stroke(VNTheme.accentSoft, lineWidth: 2)
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
+        }
+        .compositingGroup()
+    }
+
+    private func fittedImageRect(imageSize: CGSize, containerSize: CGSize) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0, containerSize.width > 0, containerSize.height > 0 else {
+            return CGRect(origin: .zero, size: containerSize)
+        }
+        let scale = min(containerSize.width / imageSize.width, containerSize.height / imageSize.height)
+        let size = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        return CGRect(
+            x: (containerSize.width - size.width) / 2,
+            y: (containerSize.height - size.height) / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+}
+
 struct ArchiveView: View {
     @EnvironmentObject private var store: TimeTavernStore
     @State private var sessionName = ""
+    @State private var previewSession: SavedSession?
+    @State private var renamingSession: SavedSession?
+    @State private var renameText = ""
 
     var body: some View {
         NavigationStack {
             List {
-                Section("保存目前對話") {
-                    TextField("存檔名稱", text: $sessionName)
-                    Button("保存") {
+                Section(uiStatic("保存目前對話")) {
+                    TextField(uiStatic("存檔名稱"), text: $sessionName)
+                    Button(uiStatic("保存")) {
                         store.saveSession(named: sessionName)
                         sessionName = ""
                     }
                 }
-                Section("存檔") {
-                    ForEach(store.state.savedSessions) { session in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(session.name).font(.headline)
-                            Text("角色：\(session.roleCardName) · 訊息 \(session.conversation.count)")
-                                .font(.caption)
-                                .foregroundStyle(VNTheme.textSecondary)
-                            HStack {
-                                Button("載入") { store.load(session: session) }
-                                Spacer()
-                                Text(session.updatedAt, style: .date)
-                                    .font(.caption2)
-                                    .foregroundStyle(VNTheme.textSecondary)
+                sessionSection(title: uiStatic("存檔"), sessions: activeSessions, archived: false)
+                sessionSection(title: uiStatic("封存"), sessions: archivedSessions, archived: true)
+            }
+            .visualNovelListChrome()
+            .navigationTitle(uiStatic("存檔"))
+            .sheet(item: $previewSession) { session in
+                SessionPreviewView(session: session)
+            }
+            .sheet(item: $renamingSession) { session in
+                NavigationStack {
+                    Form {
+                        TextField(uiStatic("存檔名稱"), text: $renameText)
+                    }
+                    .visualNovelListChrome()
+                    .navigationTitle(uiStatic("重新命名"))
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button(uiStatic("取消")) { renamingSession = nil }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button(uiStatic("保存")) {
+                                store.renameSession(id: session.id, name: renameText)
+                                renamingSession = nil
                             }
                         }
                     }
-                    .onDelete(perform: store.deleteSessions)
+                }
+            }
+        }
+    }
+
+    private var activeSessions: [SavedSession] {
+        store.state.savedSessions.filter { !$0.archived }
+    }
+
+    private var archivedSessions: [SavedSession] {
+        store.state.savedSessions.filter(\.archived)
+    }
+
+    @ViewBuilder
+    private func sessionSection(title: String, sessions: [SavedSession], archived: Bool) -> some View {
+        if !sessions.isEmpty {
+            Section(title) {
+                ForEach(sessions) { session in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(session.name).font(.headline)
+                            if session.archived {
+                                Text(uiStatic("封存"))
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(VNTheme.accentSoft)
+                            }
+                        }
+                        Text(uiStatic("角色：\(session.roleCardName) · 訊息 \(session.conversation.count)"))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+                        HStack {
+                            Button(uiStatic("載入")) { store.load(session: session) }
+                            Button(uiStatic("預覽")) { previewSession = session }
+                            Spacer()
+                            Text(session.updatedAt, style: .date)
+                                .font(.caption2)
+                                .foregroundStyle(VNTheme.textSecondary)
+                        }
+                    }
+                    .swipeActions(edge: .trailing) {
+                        Button(role: .destructive) {
+                            store.deleteSession(id: session.id)
+                        } label: {
+                            Label(uiStatic("刪除"), systemImage: "trash")
+                        }
+                        Button {
+                            store.setSessionArchived(id: session.id, archived: !archived)
+                        } label: {
+                            Label(archived ? uiStatic("恢復") : uiStatic("封存"), systemImage: archived ? "arrow.uturn.backward" : "archivebox")
+                        }
+                    }
+                    .contextMenu {
+                        Button(uiStatic("載入")) { store.load(session: session) }
+                        Button(uiStatic("預覽")) { previewSession = session }
+                        Button(uiStatic("重新命名")) {
+                            renamingSession = session
+                            renameText = session.name
+                        }
+                        Button(archived ? uiStatic("恢復") : uiStatic("封存")) {
+                            store.setSessionArchived(id: session.id, archived: !archived)
+                        }
+                        Button(role: .destructive) {
+                            store.deleteSession(id: session.id)
+                        } label: {
+                            Text(uiStatic("刪除"))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct SessionPreviewView: View {
+    var session: SavedSession
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section(uiStatic("資訊")) {
+                    Text(session.name)
+                    Text(uiStatic("角色：\(session.roleCardName)"))
+                    Text(uiStatic("訊息 \(session.conversation.count)"))
+                    Text(session.updatedAt, style: .date)
+                }
+                Section(uiStatic("對話預覽")) {
+                    ForEach(session.conversation.prefix(20)) { message in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(message.role == .user ? uiStatic("你") : "AI")
+                                .font(.caption.bold())
+                                .foregroundStyle(VNTheme.accentSoft)
+                            Text(message.content)
+                                .font(.caption)
+                                .lineLimit(6)
+                        }
+                    }
                 }
             }
             .visualNovelListChrome()
-            .navigationTitle("存檔")
+            .navigationTitle(uiStatic("存檔預覽"))
         }
     }
 }
@@ -927,7 +1443,7 @@ struct StudioView: View {
         NavigationStack {
             VStack(spacing: 12) {
                 VNGlassCard(cornerRadius: 20, accentOpacity: 0.34) {
-                    Picker("工房", selection: $mode) {
+                    Picker(uiStatic("工房"), selection: $mode) {
                         ForEach(StudioMode.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .pickerStyle(.segmented)
@@ -940,7 +1456,7 @@ struct StudioView: View {
                     NovelAIView()
                 }
             }
-            .navigationTitle("工房")
+            .navigationTitle(uiStatic("工房"))
             .background(VisualNovelBackground())
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbarColorScheme(.dark, for: .navigationBar)
@@ -953,40 +1469,75 @@ struct PromptLabView: View {
     @State private var selectedQuickModeID = ""
     @State private var selectedQuickProfileID = ""
     @State private var showModeImporter = false
+    static let exposesQuickProfileKindAndImageSettings = true
+    static let showsExpandedQuickImageSettings = true
 
     var body: some View {
         List {
-            Section("壓縮狀態快捷區") {
+            Section(uiStatic("壓縮狀態快捷區")) {
                 if store.state.promptModes.isEmpty {
-                    Text("尚未建立 Prompt 模式。")
+                    Text(uiStatic("尚未建立 Prompt 模式。"))
                         .foregroundStyle(VNTheme.textSecondary)
                 } else {
-                    Picker("模式", selection: selectedModeBinding) {
+                    Picker(uiStatic("模式"), selection: selectedModeBinding) {
                         ForEach(store.state.promptModes) { mode in
                             Text(mode.name).tag(mode.id)
                         }
                     }
-                    if let modeIndex = selectedModeIndex {
-                        let mode = store.state.promptModes[modeIndex]
-                        Picker("大模型", selection: selectedProfileBinding(modeIndex: modeIndex)) {
+                    if let mode = selectedMode {
+                        Picker(uiStatic("大模型"), selection: selectedProfileBinding(modeID: mode.id)) {
                             ForEach(mode.compressionProfiles) { profile in
                                 Text(profile.name).tag(profile.id)
                             }
                         }
-                        if let profileIndex = selectedProfileIndex(modeIndex: modeIndex) {
-                            TextEditor(text: $store.state.promptModes[modeIndex].compressionProfiles[profileIndex].summary)
-                                .frame(minHeight: 120)
-                            Text("已壓縮到第 \(store.state.promptModes[modeIndex].compressionProfiles[profileIndex].compressedThroughTurnNumber) 回合")
+                        if let profile = selectedProfile(modeID: mode.id) {
+                            Text(profile.modelKind.title)
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(profile.modelKind == .image ? VNTheme.accentSoft : VNTheme.textSecondary)
+                            Picker(uiStatic("大模型類型"), selection: profileKindBinding(modeID: mode.id, profileID: profile.id)) {
+                                ForEach(CompressionProfileKind.allCases) { kind in
+                                    Text(kind.title).tag(kind)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            Text(profile.modelKind.helpText)
                                 .font(.caption)
                                 .foregroundStyle(VNTheme.textSecondary)
-                            NavigationLink("完整設定") {
-                                CompressionProfileEditorView(profile: $store.state.promptModes[modeIndex].compressionProfiles[profileIndex])
+                            if profile.modelKind == .image {
+                                Text(uiStatic("建立圖片設定"))
+                                    .font(.headline)
+                                    .foregroundStyle(VNTheme.accentSoft)
+                                Text(uiStatic("大模型 call api 的輸出會作為 NovelAI Base Prompt；以下設定會送到 NAI。"))
+                                    .font(.caption)
+                                    .foregroundStyle(VNTheme.textSecondary)
+                                ImageGenerationSettingsEditor(settings: profileImageGenerationBinding(modeID: mode.id, profileID: profile.id))
+                            } else {
+                                Text(profile.storageModeDescription)
+                                    .font(.caption)
+                                    .foregroundStyle(VNTheme.textSecondary)
+                                if let binding = profileBinding(modeID: mode.id, profileID: profile.id) {
+                                    NavigationLink(uiStatic("編輯模塊 / 保存方式")) {
+                                        CompressionContextEditorView(profile: binding)
+                                    }
+                                }
+                            }
+                            TextEditor(text: profileSummaryBinding(modeID: mode.id, profileID: profile.id))
+                                .frame(minHeight: 120)
+                            Text(uiStatic("已壓縮到第 \(profile.compressedThroughTurnNumber) 回合"))
+                                .font(.caption)
+                                .foregroundStyle(VNTheme.textSecondary)
+                            NavigationLink(uiStatic("完整設定")) {
+                                if let binding = profileBinding(modeID: mode.id, profileID: profile.id) {
+                                    CompressionProfileEditorView(profile: binding)
+                                } else {
+                                    Text(uiStatic("此大模型已不存在。"))
+                                }
                             }
                         }
                     }
                 }
             }
-            Section("模式") {
+            Section(uiStatic("模式")) {
                 ForEach($store.state.promptModes) { $mode in
                     NavigationLink {
                         PromptModeEditorView(mode: $mode, isBuiltIn: Self.isBuiltIn(mode.id))
@@ -996,7 +1547,7 @@ struct PromptLabView: View {
                                 Text(mode.name)
                                     .font(.headline)
                                 if Self.isBuiltIn(mode.id) {
-                                    Text("內建")
+                                    Text(uiStatic("內建"))
                                         .font(.caption2.weight(.bold))
                                         .foregroundStyle(VNTheme.accentSoft)
                                         .padding(.horizontal, 8)
@@ -1004,7 +1555,7 @@ struct PromptLabView: View {
                                         .background(Capsule().fill(VNTheme.accent.opacity(0.16)))
                                 }
                             }
-                            Text("\(mode.mode) · 自動上下文 · Profiles \(mode.compressionProfiles.count)")
+                            Text(uiStatic("\(mode.mode) · 自動上下文 · Profiles \(mode.compressionProfiles.count)"))
                                 .font(.caption)
                                 .foregroundStyle(VNTheme.textSecondary)
                         }
@@ -1022,24 +1573,24 @@ struct PromptLabView: View {
                     ))
                     store.persist()
                 } label: {
-                    Label("新增自訂模式", systemImage: "plus")
+                    Label(uiStatic("新增自訂模式"), systemImage: "plus")
                 }
                 Button {
                     showModeImporter = true
                 } label: {
-                    Label("匯入模式 JSON", systemImage: "square.and.arrow.down")
+                    Label(uiStatic("匯入模式 JSON"), systemImage: "square.and.arrow.down")
                 }
                 Button {
                     if let mode = store.state.promptModes.first(where: { $0.id == effectiveModeID }) {
                         store.exportPromptModeJSON(mode)
                     }
                 } label: {
-                    Label("匯出目前模式 JSON", systemImage: "square.and.arrow.up")
+                    Label(uiStatic("匯出目前模式 JSON"), systemImage: "square.and.arrow.up")
                 }
                 .disabled(store.state.promptModes.isEmpty)
                 if let url = store.exportedJSONURL {
                     ShareLink(item: url) {
-                        Label("分享 JSON", systemImage: "paperplane")
+                        Label(uiStatic("分享 JSON"), systemImage: "paperplane")
                     }
                 }
             }
@@ -1060,8 +1611,12 @@ struct PromptLabView: View {
         ["single", "multi", "no_role"].contains(id)
     }
 
+    static func modeIDs(at offsets: IndexSet, in modes: [PromptModeConfig]) -> [String] {
+        offsets.compactMap { modes.indices.contains($0) ? modes[$0].id : nil }
+    }
+
     private func deleteModes(at offsets: IndexSet) {
-        let ids = offsets.map { store.state.promptModes[$0].id }
+        let ids = Self.modeIDs(at: offsets, in: store.state.promptModes)
         store.state.promptModes.removeAll { ids.contains($0.id) && !Self.isBuiltIn($0.id) }
         store.persist()
     }
@@ -1073,8 +1628,8 @@ struct PromptLabView: View {
         return store.state.promptModes.first?.id ?? ""
     }
 
-    private var selectedModeIndex: Int? {
-        store.state.promptModes.firstIndex { $0.id == effectiveModeID }
+    private var selectedMode: PromptModeConfig? {
+        store.state.promptModes.first { $0.id == effectiveModeID }
     }
 
     private var selectedModeBinding: Binding<String> {
@@ -1087,10 +1642,10 @@ struct PromptLabView: View {
         )
     }
 
-    private func selectedProfileBinding(modeIndex: Int) -> Binding<String> {
+    private func selectedProfileBinding(modeID: String) -> Binding<String> {
         Binding(
             get: {
-                let profiles = store.state.promptModes[modeIndex].compressionProfiles
+                let profiles = profiles(for: modeID)
                 if profiles.contains(where: { $0.id == selectedQuickProfileID }) {
                     return selectedQuickProfileID
                 }
@@ -1100,10 +1655,84 @@ struct PromptLabView: View {
         )
     }
 
-    private func selectedProfileIndex(modeIndex: Int) -> Int? {
-        let profiles = store.state.promptModes[modeIndex].compressionProfiles
+    private func selectedProfile(modeID: String) -> CompressionProfile? {
+        let profiles = profiles(for: modeID)
         let id = profiles.contains(where: { $0.id == selectedQuickProfileID }) ? selectedQuickProfileID : profiles.first?.id ?? ""
-        return profiles.firstIndex { $0.id == id }
+        return profiles.first { $0.id == id }
+    }
+
+    private func profiles(for modeID: String) -> [CompressionProfile] {
+        store.state.promptModes.first { $0.id == modeID }?.compressionProfiles ?? []
+    }
+
+    private func profileBinding(modeID: String, profileID: String) -> Binding<CompressionProfile>? {
+        guard let modeIndex = store.state.promptModes.firstIndex(where: { $0.id == modeID }),
+              store.state.promptModes[modeIndex].compressionProfiles.contains(where: { $0.id == profileID })
+        else { return nil }
+        return Binding(
+            get: {
+                guard let modeIndex = store.state.promptModes.firstIndex(where: { $0.id == modeID }),
+                      let profileIndex = store.state.promptModes[modeIndex].compressionProfiles.firstIndex(where: { $0.id == profileID })
+                else { return CompressionProfile(id: profileID, name: "已刪除大模型", enabled: false) }
+                return store.state.promptModes[modeIndex].compressionProfiles[profileIndex]
+            },
+            set: { next in
+                guard let modeIndex = store.state.promptModes.firstIndex(where: { $0.id == modeID }),
+                      let profileIndex = store.state.promptModes[modeIndex].compressionProfiles.firstIndex(where: { $0.id == profileID })
+                else { return }
+                store.state.promptModes[modeIndex].compressionProfiles[profileIndex] = next
+            }
+        )
+    }
+
+    private func profileKindBinding(modeID: String, profileID: String) -> Binding<CompressionProfileKind> {
+        Binding(
+            get: {
+                profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue.modelKind ?? .normal
+            },
+            set: { nextKind in
+                guard var profile = profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue else { return }
+                profile.applyModelKind(nextKind)
+                profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue = profile
+            }
+        )
+    }
+
+    private func profileImageGenerationBinding(modeID: String, profileID: String) -> Binding<NovelAIImageGenerationSettings> {
+        Binding(
+            get: {
+                guard var profile = profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue else {
+                    return .compressionTriggerDefault
+                }
+                profile.applyModelKind(.image)
+                guard let index = profile.primaryImageTriggerActionIndex,
+                      profile.triggerActions.indices.contains(index)
+                else { return .compressionTriggerDefault }
+                return profile.triggerActions[index].imageGeneration
+            },
+            set: { next in
+                guard var profile = profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue else { return }
+                profile.applyModelKind(.image)
+                guard let index = profile.primaryImageTriggerActionIndex,
+                      profile.triggerActions.indices.contains(index)
+                else { return }
+                profile.triggerActions[index].imageGeneration = next
+                profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue = profile
+            }
+        )
+    }
+
+    private func profileSummaryBinding(modeID: String, profileID: String) -> Binding<String> {
+        Binding(
+            get: {
+                profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue.summary ?? ""
+            },
+            set: { next in
+                guard var profile = profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue else { return }
+                profile.summary = next
+                profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue = profile
+            }
+        )
     }
 }
 
@@ -1116,28 +1745,28 @@ struct PromptModeEditorView: View {
 
     var body: some View {
         Form {
-            Section("模式設定") {
-                TextField("名稱", text: $mode.name)
+            Section(uiStatic("模式設定")) {
+                TextField(uiStatic("名稱"), text: $mode.name)
                 TextField("Mode ID", text: $mode.mode)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Text("上下文輪數由模式設定與壓縮觸發自動使用。")
+                Text(uiStatic("上下文輪數由模式設定與壓縮觸發自動使用。"))
                     .font(.caption)
                     .foregroundStyle(VNTheme.textSecondary)
                 if isBuiltIn {
-                    Label("內建模式不可刪除，但可以調整內容。", systemImage: "lock.fill")
+                    Label(uiStatic("內建模式不可刪除，但可以調整內容。"), systemImage: "lock.fill")
                         .font(.caption)
                         .foregroundStyle(VNTheme.textSecondary)
                 }
             }
-            Section("編輯器") {
-                NavigationLink("正文規則") {
+            Section(uiStatic("編輯器")) {
+                NavigationLink(uiStatic("正文規則")) {
                     PromptRulesEditorView(mode: $mode)
                 }
-                NavigationLink("壓縮大模型") {
+                NavigationLink(uiStatic("壓縮大模型")) {
                     CompressionProfileListView(mode: $mode)
                 }
-                NavigationLink("雙 Prompt Preview") {
+                NavigationLink(uiStatic("雙 Prompt Preview")) {
                     PromptPreviewView(mode: mode)
                 }
             }
@@ -1145,7 +1774,7 @@ struct PromptModeEditorView: View {
         .visualNovelListChrome()
         .navigationTitle(mode.name)
         .toolbar {
-            Button("保存") { store.persist() }
+            Button(uiStatic("保存")) { store.persist() }
         }
     }
 }
@@ -1157,17 +1786,17 @@ struct PromptRulesEditorView: View {
 
     var body: some View {
         Form {
-            Section("正文 System Prompt") {
+            Section(uiStatic("正文 System Prompt")) {
                 TextEditor(text: $mode.reasonerHistoryConfig.mainRules)
                     .frame(minHeight: 220)
             }
-            Section("上下文規則") {
+            Section(uiStatic("上下文規則")) {
                 TextEditor(text: $mode.reasonerHistoryConfig.contextRules)
                     .frame(minHeight: 180)
             }
         }
         .visualNovelListChrome()
-        .navigationTitle("正文規則")
+        .navigationTitle(uiStatic("正文規則"))
     }
 }
 
@@ -1179,9 +1808,9 @@ struct CompressionProfileListView: View {
 
     var body: some View {
         List {
-            Section("大模型 JSON") {
+            Section(uiStatic("大模型 JSON")) {
                 if !mode.compressionProfiles.isEmpty {
-                    Picker("目前大模型", selection: selectedProfileBinding) {
+                    Picker(uiStatic("目前大模型"), selection: selectedProfileBinding) {
                         ForEach(mode.compressionProfiles) { profile in
                             Text(profile.name).tag(profile.id)
                         }
@@ -1190,19 +1819,19 @@ struct CompressionProfileListView: View {
                 Button {
                     showProfileImporter = true
                 } label: {
-                    Label("匯入大模型 JSON", systemImage: "square.and.arrow.down")
+                    Label(uiStatic("匯入大模型 JSON"), systemImage: "square.and.arrow.down")
                 }
                 Button {
                     if let profile = mode.compressionProfiles.first(where: { $0.id == effectiveProfileID }) {
                         store.exportCompressionProfileJSON(profile)
                     }
                 } label: {
-                    Label("匯出目前大模型 JSON", systemImage: "square.and.arrow.up")
+                    Label(uiStatic("匯出目前大模型 JSON"), systemImage: "square.and.arrow.up")
                 }
                 .disabled(mode.compressionProfiles.isEmpty)
                 if let url = store.exportedJSONURL {
                     ShareLink(item: url) {
-                        Label("分享 JSON", systemImage: "paperplane")
+                        Label(uiStatic("分享 JSON"), systemImage: "paperplane")
                     }
                 }
             }
@@ -1219,7 +1848,7 @@ struct CompressionProfileListView: View {
                                     .foregroundStyle(VNTheme.accentSoft)
                             }
                         }
-                        Text("\(profile.contextScope.title) · Trigger \(profile.triggerActions.count) · 模型 \(profile.contextCompression.models.count)")
+                        Text("\(profile.modelKind.title) · \(profile.contextScope.title) · \(profile.storageMode.title) · Trigger \(profile.triggerActions.count)")
                             .font(.caption)
                             .foregroundStyle(VNTheme.textSecondary)
                     }
@@ -1227,17 +1856,18 @@ struct CompressionProfileListView: View {
             }
             .onDelete(perform: deleteProfiles)
             Button {
-                mode.compressionProfiles.append(CompressionProfile(
-                    id: "compression_profile_\(UUID().uuidString)",
-                    name: "自訂壓縮",
-                    locked: false
-                ))
+                mode.compressionProfiles.append(Self.newProfile(kind: .normal, count: mode.compressionProfiles.count))
             } label: {
-                Label("新增 Profile", systemImage: "plus")
+                Label(uiStatic("新增普通大模型"), systemImage: "plus")
+            }
+            Button {
+                mode.compressionProfiles.append(Self.newProfile(kind: .image, count: mode.compressionProfiles.count))
+            } label: {
+                Label(uiStatic("新增跑圖大模型"), systemImage: "photo")
             }
         }
         .visualNovelListChrome()
-        .navigationTitle("壓縮 Profiles")
+        .navigationTitle(uiStatic("壓縮 Profiles"))
         .fileImporter(isPresented: $showProfileImporter, allowedContentTypes: [.json]) { result in
             if case let .success(url) = result {
                 _ = url.startAccessingSecurityScopedResource()
@@ -1247,8 +1877,22 @@ struct CompressionProfileListView: View {
         }
     }
 
+    static func profileIDs(at offsets: IndexSet, in profiles: [CompressionProfile]) -> [String] {
+        offsets.compactMap { profiles.indices.contains($0) ? profiles[$0].id : nil }
+    }
+
+    private static func newProfile(kind: CompressionProfileKind, count: Int) -> CompressionProfile {
+        var profile = CompressionProfile(
+            id: "compression_profile_\(UUID().uuidString)",
+            name: kind == .image ? "跑圖大模型 \(count + 1)" : "普通大模型 \(count + 1)",
+            locked: false
+        )
+        profile.applyModelKind(kind)
+        return profile
+    }
+
     private func deleteProfiles(at offsets: IndexSet) {
-        let ids = offsets.map { mode.compressionProfiles[$0].id }
+        let ids = Self.profileIDs(at: offsets, in: mode.compressionProfiles)
         mode.compressionProfiles.removeAll { ids.contains($0.id) && !$0.locked && $0.id != "standard" }
     }
 
@@ -1269,33 +1913,91 @@ struct CompressionProfileListView: View {
 
 struct CompressionProfileEditorView: View {
     @Binding var profile: CompressionProfile
+    static let exposesProfileKindPicker = true
 
     var body: some View {
         Form {
             Section("Profile") {
-                TextField("名稱", text: $profile.name)
-                Toggle("啟用", isOn: $profile.enabled)
-                Toggle("鎖定", isOn: $profile.locked)
-                Picker("壓縮範圍", selection: $profile.contextScope) {
+                TextField(uiStatic("名稱"), text: $profile.name)
+                Toggle(uiStatic("啟用"), isOn: $profile.enabled)
+                Toggle(uiStatic("鎖定"), isOn: $profile.locked)
+                Picker(uiStatic("壓縮範圍"), selection: $profile.contextScope) {
                     ForEach(CompressionContextScope.allCases) { scope in
                         Text(scope.title).tag(scope)
                     }
                 }
             }
-            Section("規則與動作") {
-                NavigationLink("壓縮 Prompt / 模型") {
+            Section(uiStatic("大模型類型")) {
+                Picker(uiStatic("類型"), selection: profileKindBinding) {
+                    ForEach(CompressionProfileKind.allCases) { kind in
+                        Text(kind.title).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(profile.modelKind.helpText)
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
+            }
+            if Self.imageSettingsVisibility(for: profile) {
+                Section(uiStatic("跑圖設定")) {
+                    Text(uiStatic("對齊網頁端：大模型 call api 的輸出會作為 NovelAI Base Prompt，下方設定會送到 NAI。"))
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
+                    ImageGenerationSettingsEditor(settings: primaryImageGenerationBinding)
+                }
+            } else {
+                Section(uiStatic("保存方式")) {
+                    Text(profile.storageModeDescription)
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
+                }
+            }
+            Section(uiStatic("規則與動作")) {
+                NavigationLink(uiStatic("壓縮 Prompt / 模型")) {
                     CompressionContextEditorView(profile: $profile)
                 }
-                NavigationLink("觸發組合") {
+                NavigationLink(uiStatic("觸發組合")) {
                     TriggerActionListView(profile: $profile)
                 }
-                NavigationLink("首次觸發追加詞") {
+                NavigationLink(uiStatic("首次觸發追加詞")) {
                     AppendTermListView(profile: $profile)
                 }
             }
         }
         .visualNovelListChrome()
         .navigationTitle(profile.name)
+    }
+
+    static func imageSettingsVisibility(for profile: CompressionProfile) -> Bool {
+        profile.modelKind == .image
+    }
+
+    private var profileKindBinding: Binding<CompressionProfileKind> {
+        Binding(
+            get: { profile.modelKind },
+            set: { profile.applyModelKind($0) }
+        )
+    }
+
+    private var primaryImageGenerationBinding: Binding<NovelAIImageGenerationSettings> {
+        Binding(
+            get: {
+                guard let index = profile.primaryImageTriggerActionIndex else {
+                    return .compressionTriggerDefault
+                }
+                guard profile.triggerActions.indices.contains(index) else {
+                    return .compressionTriggerDefault
+                }
+                return profile.triggerActions[index].imageGeneration
+            },
+            set: { next in
+                profile.applyModelKind(.image)
+                guard let index = profile.primaryImageTriggerActionIndex,
+                      profile.triggerActions.indices.contains(index)
+                else { return }
+                profile.triggerActions[index].imageGeneration = next
+            }
+        )
     }
 }
 
@@ -1304,11 +2006,21 @@ struct CompressionContextEditorView: View {
 
     var body: some View {
         Form {
-            Section("壓縮主規則") {
+            Section(uiStatic("保存方式")) {
+                Text(profile.storageModeDescription)
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
+            }
+            Section(uiStatic("壓縮主規則")) {
                 TextEditor(text: $profile.contextCompression.mainRules)
                     .frame(minHeight: 240)
             }
-            Section("模塊") {
+            Section(uiStatic("模塊")) {
+                if profile.contextCompression.models.isEmpty {
+                    Text(uiStatic("尚未建立模塊，這個普通大模型會以純文本方式保存模型內容。新增模塊後，輸出會改成 JSON model.ID / delete.ID。"))
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
+                }
                 ForEach($profile.contextCompression.models) { $model in
                     NavigationLink {
                         CompressionModelEditorView(model: $model)
@@ -1323,17 +2035,17 @@ struct CompressionContextEditorView: View {
                     }
                 }
                 .onDelete { offsets in
-                    profile.contextCompression.models.remove(atOffsets: offsets)
+                    profile.contextCompression.models.remove(atValidOffsets: offsets)
                 }
                 Button {
                     profile.contextCompression.models.append(CompressionModel(name: "新模塊"))
                 } label: {
-                    Label("新增模塊", systemImage: "plus")
+                    Label(uiStatic("新增模塊"), systemImage: "plus")
                 }
             }
         }
         .visualNovelListChrome()
-        .navigationTitle("壓縮 Prompt")
+        .navigationTitle(uiStatic("壓縮 Prompt"))
     }
 }
 
@@ -1345,16 +2057,16 @@ struct CompressionModelEditorView: View {
             TextField("ID", text: $model.id)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            TextField("名稱", text: $model.name)
-            Section("新增規則") {
+            TextField(uiStatic("名稱"), text: $model.name)
+            Section(uiStatic("新增規則")) {
                 TextEditor(text: $model.addRules).frame(minHeight: 160)
             }
-            Section("刪除規則") {
+            Section(uiStatic("刪除規則")) {
                 TextEditor(text: $model.deleteRules).frame(minHeight: 160)
             }
         }
         .visualNovelListChrome()
-        .navigationTitle(model.name.isEmpty ? "模塊" : model.name)
+        .navigationTitle(model.name.isEmpty ? uiStatic("模塊") : model.name)
     }
 }
 
@@ -1376,58 +2088,151 @@ struct TriggerActionListView: View {
                     }
                 }
             }
-            .onDelete { offsets in
-                profile.triggerActions.remove(atOffsets: offsets)
-            }
+            .onDelete(perform: deleteActions)
             Button {
                 profile.triggerActions.append(CompressionTriggerAction())
             } label: {
-                Label("新增觸發", systemImage: "plus")
+                Label(uiStatic("新增觸發"), systemImage: "plus")
             }
         }
         .visualNovelListChrome()
-        .navigationTitle("觸發組合")
+        .navigationTitle(uiStatic("觸發組合"))
+    }
+
+    static func validActionOffsets(_ offsets: IndexSet, in actions: [CompressionTriggerAction]) -> IndexSet {
+        IndexSet(offsets.filter { actions.indices.contains($0) })
+    }
+
+    private func deleteActions(at offsets: IndexSet) {
+        profile.triggerActions.remove(atValidOffsets: offsets)
+        if profile.triggerActions.isEmpty {
+            profile.triggerActions = [CompressionTriggerAction(name: "觸發組合 1")]
+        }
+    }
+}
+
+struct ImageGenerationSettingsEditor: View {
+    @Binding var settings: NovelAIImageGenerationSettings
+
+    var body: some View {
+        NovelAIModelPicker(model: $settings.model, title: "模型")
+        TextEditor(text: $settings.negativePrompt)
+            .frame(minHeight: 80)
+            .overlay(alignment: .topLeading) {
+                if settings.negativePrompt.isEmpty {
+                    Text("Undesired Content / Negative Prompt")
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
+                        .padding(6)
+                }
+            }
+        Stepper(uiStatic("寬 \(settings.width)"), value: $settings.width, in: 64...2048, step: 64)
+        Stepper(uiStatic("高 \(settings.height)"), value: $settings.height, in: 64...2048, step: 64)
+        Stepper("Steps \(settings.steps)", value: $settings.steps, in: 1...50)
+        Stepper(uiStatic("張數 \(settings.samples)"), value: $settings.samples, in: 1...4)
+        Slider(value: $settings.scale, in: 0...20, step: 0.1) {
+            Text("Prompt Guidance")
+        }
+        Text("Prompt Guidance \(settings.scale, specifier: "%.1f")")
+            .font(.caption)
+        Slider(value: $settings.cfgRescale, in: 0...1, step: 0.05) {
+            Text("Prompt Guidance Rescale")
+        }
+        Text("Prompt Guidance Rescale \(settings.cfgRescale, specifier: "%.2f")")
+            .font(.caption)
+        Picker("Sampler", selection: $settings.sampler) {
+            ForEach(NovelAIOptionLists.samplerOptions, id: \.id) { option in
+                Text(option.title).tag(option.id)
+            }
+        }
+        Picker("Noise Schedule", selection: $settings.noiseSchedule) {
+            ForEach(NovelAIOptionLists.noiseScheduleOptions, id: \.id) { option in
+                Text(option.title).tag(option.id)
+            }
+        }
+        Stepper("UC Preset \(settings.ucPreset)", value: $settings.ucPreset, in: 0...99)
+        Toggle("Variety+", isOn: $settings.varietyPlus)
+        Picker(uiStatic("格式"), selection: $settings.imageFormat) {
+            ForEach(NovelAIOptionLists.imageFormatOptions, id: \.id) { option in
+                Text(option.title).tag(option.id)
+            }
+        }
+        TextField(uiStatic("Seed（空白 = random）"), text: imageSeedBinding)
+            .keyboardType(.numberPad)
+    }
+
+    private var imageSeedBinding: Binding<String> {
+        Binding(
+            get: { settings.seed.map(String.init) ?? "" },
+            set: { settings.seed = Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        )
     }
 }
 
 struct TriggerActionEditorView: View {
     @Binding var action: CompressionTriggerAction
+    static let exposesFullImageGenerationSettings = true
 
     var body: some View {
         Form {
-            Section("動作") {
-                TextField("名稱", text: $action.name)
-                Toggle("啟用", isOn: $action.enabled)
-                Picker("動作", selection: $action.action) {
+            Section(uiStatic("動作")) {
+                TextField(uiStatic("名稱"), text: $action.name)
+                Toggle(uiStatic("啟用"), isOn: $action.enabled)
+                Picker(uiStatic("動作"), selection: $action.action) {
                     ForEach(CompressionTriggerActionKind.allCases) { kind in
                         Text(kind.rawValue).tag(kind)
                     }
                 }
-                Picker("關鍵字後續", selection: $action.keywordFollowupAction) {
+                Picker(uiStatic("關鍵字後續"), selection: $action.keywordFollowupAction) {
                     ForEach(KeywordFollowupAction.allCases) { followup in
                         Text(followup.title).tag(followup)
                     }
                 }
-                Toggle("跳過正文 Reasoner", isOn: $action.skipReasoner)
+                Toggle(uiStatic("跳過正文 Reasoner"), isOn: $action.skipReasoner)
             }
-            Section("觸發條件") {
-                Toggle("每輪觸發", isOn: $action.triggers.everyTurn)
-                Toggle("達到上下文輪數觸發", isOn: $action.triggers.roundLimit)
-                TextField("指定回合，用逗號分隔", text: intListBinding($action.triggers.turns))
+            Section(uiStatic("觸發條件")) {
+                Toggle(uiStatic("每輪觸發"), isOn: $action.triggers.everyTurn)
+                Toggle(uiStatic("達到上下文輪數觸發"), isOn: $action.triggers.roundLimit)
+                TextField(uiStatic("指定回合，用逗號分隔"), text: intListBinding($action.triggers.turns))
                     .keyboardType(.numbersAndPunctuation)
-                TextField("關鍵字，用逗號分隔", text: stringListBinding($action.triggers.keywords))
-                TextField("關鍵字來源", text: $action.triggers.keywordSource)
+                TextField(uiStatic("關鍵字，用逗號分隔"), text: stringListBinding($action.triggers.keywords))
+                TextField(uiStatic("關鍵字來源"), text: $action.triggers.keywordSource)
             }
             Section("NovelAI Prompt Trigger") {
-                Toggle("啟用 NovelAI Prompt", isOn: $action.novelAIEnabled)
-                TextEditor(text: $action.novelAIPromptTemplate).frame(minHeight: 120)
-                NovelAIModelPicker(model: $action.imageGeneration.model, title: "模型")
-                Stepper("寬 \(action.imageGeneration.width)", value: $action.imageGeneration.width, in: 512...1536, step: 64)
-                Stepper("高 \(action.imageGeneration.height)", value: $action.imageGeneration.height, in: 512...1536, step: 64)
+                Toggle(uiStatic("啟用 NovelAI Prompt"), isOn: $action.novelAIEnabled)
+                Text(uiStatic("大模型 call api 的輸出會作為 NovelAI Base Prompt；以下設定會跟網頁端的建立圖片設定一起送到 NAI。"))
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
+                TextEditor(text: $action.novelAIPromptTemplate)
+                    .frame(minHeight: 120)
+                    .overlay(alignment: .topLeading) {
+                        if action.novelAIPromptTemplate.isEmpty {
+                            Text(uiStatic("Prompt template / 留空時使用大模型輸出"))
+                                .font(.caption)
+                                .foregroundStyle(VNTheme.textSecondary)
+                                .padding(6)
+                        }
+                    }
+            }
+            if action.keywordFollowupAction.isImageGeneration {
+                Section(uiStatic("建立圖片設定")) {
+                    ImageGenerationSettingsEditor(settings: $action.imageGeneration)
+                }
+            } else {
+                Section(uiStatic("建立圖片設定")) {
+                    Text(uiStatic("選擇「建立圖片，然後繼續觸發正文」或「建立圖片並行」後，這裡會顯示 NovelAI 跑圖設定。"))
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
+                }
             }
         }
         .visualNovelListChrome()
         .navigationTitle(action.name)
+        .onChange(of: action.keywordFollowupAction) { _, next in
+            guard next.isImageGeneration else { return }
+            action.action = .callAPI
+            action.novelAIEnabled = true
+        }
     }
 
     private func stringListBinding(_ binding: Binding<[String]>) -> Binding<String> {
@@ -1452,6 +2257,7 @@ struct TriggerActionEditorView: View {
             }
         )
     }
+
 }
 
 struct AppendTermListView: View {
@@ -1460,19 +2266,19 @@ struct AppendTermListView: View {
     var body: some View {
         Form {
             ForEach($profile.appendTerms) { $term in
-                Section(term.player.isEmpty ? "追加詞" : term.player) {
-                    TextField("玩家座位", text: $term.player)
+                Section(term.player.isEmpty ? uiStatic("追加詞") : term.player) {
+                    TextField(uiStatic("玩家座位"), text: $term.player)
                     TextEditor(text: $term.content).frame(minHeight: 80)
-                    Toggle("啟用", isOn: $term.enabled)
+                    Toggle(uiStatic("啟用"), isOn: $term.enabled)
                 }
             }
             .onDelete { offsets in
-                profile.appendTerms.remove(atOffsets: offsets)
+                profile.appendTerms.remove(atValidOffsets: offsets)
             }
-            Button("新增追加詞") { profile.appendTerms.append(CompressionAppendTerm()) }
+            Button(uiStatic("新增追加詞")) { profile.appendTerms.append(CompressionAppendTerm()) }
         }
         .visualNovelListChrome()
-        .navigationTitle("追加詞")
+        .navigationTitle(uiStatic("追加詞"))
     }
 }
 
@@ -1485,7 +2291,7 @@ struct PromptPreviewView: View {
             VStack(spacing: 14) {
                 VNGlassCard(cornerRadius: 20, accentOpacity: 0.28) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("正文 system prompt")
+                        Text(uiStatic("正文 system prompt"))
                             .font(.headline)
                             .foregroundStyle(VNTheme.accentSoft)
                         Text(reasonerPreview)
@@ -1498,7 +2304,7 @@ struct PromptPreviewView: View {
                 ForEach(mode.compressionProfiles) { profile in
                     VNGlassCard(cornerRadius: 20, accentOpacity: 0.24) {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("壓縮 prompt · \(profile.name)")
+                            Text(uiStatic("壓縮 prompt · \(profile.name)"))
                                 .font(.headline)
                                 .foregroundStyle(VNTheme.accentSoft)
                             Text(ConversationEngine().compressionPromptPreview(mode: mode, profile: profile))
@@ -1611,7 +2417,7 @@ struct NovelAIStudioTabBar: View {
                 VStack(spacing: 3) {
                     Image(systemName: item.systemImage)
                         .font(.system(size: 13, weight: .bold))
-                    Text(item.shortTitle)
+                    Text(uiStatic(item.shortTitle))
                         .font(.system(size: 10, weight: .bold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
@@ -1636,7 +2442,7 @@ struct NovelAIStudioTabBar: View {
                     }
                 )
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel(item.rawValue)
+                .accessibilityLabel(uiStatic(item.rawValue))
                 .accessibilityAddTraits(.isButton)
                 .accessibilityAction {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
@@ -1654,7 +2460,7 @@ struct NovelAIModelPicker: View {
     var title: String = "模型"
 
     var body: some View {
-        Picker(title, selection: normalizedBinding) {
+        Picker(uiStatic(title), selection: normalizedBinding) {
             ForEach(NovelAIModelOption.allCases) { option in
                 Text(option.title).tag(option.id)
             }
@@ -1669,21 +2475,44 @@ struct NovelAIModelPicker: View {
     }
 }
 
+enum NovelAIOptionLists {
+    static let samplerOptions: [(id: String, title: String)] = [
+        ("k_euler_ancestral", "Euler Ancestral"),
+        ("k_euler", "Euler"),
+        ("k_dpmpp_2s_ancestral", "DPM++ 2S Ancestral"),
+        ("k_dpmpp_2m", "DPM++ 2M"),
+        ("k_dpmpp_2m_sde", "DPM++ 2M SDE"),
+        ("k_dpmpp_sde", "DPM++ SDE")
+    ]
+
+    static let noiseScheduleOptions: [(id: String, title: String)] = [
+        ("karras", "Karras"),
+        ("exponential", "Exponential"),
+        ("native", "Native"),
+        ("polyexponential", "Polyexponential")
+    ]
+
+    static let imageFormatOptions: [(id: String, title: String)] = [
+        ("png", "PNG"),
+        ("webp", "WebP")
+    ]
+}
+
 struct NovelAISettingsPanel: View {
     @EnvironmentObject private var store: TimeTavernStore
     @Binding var settings: NovelAIStudioSettings
 
     var body: some View {
         Form {
-            Section("狀態") {
-                Button("讀取 status / balance") { store.testNovelAI() }
+            Section(uiStatic("狀態")) {
+                Button(uiStatic("讀取 status / balance")) { store.testNovelAI() }
                 if !store.statusText.isEmpty {
                     Text(store.statusText)
                         .font(.caption)
                         .foregroundStyle(VNTheme.textSecondary)
                 }
             }
-            Section("模型") {
+            Section(uiStatic("模型")) {
                 NovelAIModelPicker(model: $settings.imageSettings.model, title: "模型")
                 Text(NovelAIModelOption.option(for: settings.imageSettings.model)?.description ?? NovelAIModelOption.option(for: NovelAIModelOption.defaultID)?.description ?? "")
                     .font(.caption)
@@ -1713,6 +2542,9 @@ struct NovelAIPromptPanel: View {
     var body: some View {
         Form {
             Section("Base Prompt") {
+                Text(uiStatic("可用 ||片段名|| 插入固定或隨機片段；舊版 {{片段名}} 只會展開 Random Prompt。Character Prompt 會送入 NovelAI V4 角色 caption，不會混入 Base Prompt。"))
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
                 TextEditor(text: $settings.basePrompt)
                     .frame(minHeight: 130)
             }
@@ -1720,8 +2552,8 @@ struct NovelAIPromptPanel: View {
                 TextEditor(text: $settings.negativePrompt)
                     .frame(minHeight: 90)
             }
-            NovelAISnippetSection(title: "固定 Snippets", snippets: $settings.fixedSnippets)
-            NovelAISnippetSection(title: "隨機 Snippets", snippets: $settings.randomSnippets)
+            NovelAISnippetSection(title: "固定 Prompt 片段", snippets: $settings.fixedSnippets)
+            NovelAISnippetSection(title: "隨機 Prompt 片段", snippets: $settings.randomSnippets, isRandom: true)
             NovelAICharacterPromptSection(prompts: $settings.characterPrompts)
             Section("Resolved Preview") {
                 Text(NovelAIClient.resolvedPrompt(from: settings, randomIndex: { _ in 0 }))
@@ -1736,45 +2568,167 @@ struct NovelAIPromptPanel: View {
 struct NovelAISnippetSection: View {
     var title: String
     @Binding var snippets: [NovelAIPromptSnippet]
+    var isRandom = false
 
     var body: some View {
-        Section(title) {
+        Section(uiStatic(title)) {
             ForEach($snippets) { $snippet in
                 VStack(alignment: .leading, spacing: 8) {
-                    TextField("名稱，可用 ||名稱|| 插入", text: $snippet.name)
-                    TextEditor(text: $snippet.content).frame(minHeight: 80)
-                    Toggle("啟用", isOn: $snippet.enabled)
+                    TextField(uiStatic("名稱，可用 ||名稱|| 插入"), text: $snippet.name)
+                    TextEditor(text: $snippet.content)
+                        .frame(minHeight: isRandom ? 120 : 80)
+                    if isRandom {
+                        Stepper(uiStatic("抽選最少 \(snippet.min)"), value: $snippet.min, in: 0...99)
+                        Stepper(uiStatic("抽選最多 \(snippet.max)"), value: $snippet.max, in: 0...99)
+                        Toggle(uiStatic("啟用 [] 弱化"), isOn: $snippet.squareEnabled)
+                        Stepper("[] max \(snippet.squareMax)", value: $snippet.squareMax, in: 0...12)
+                        Toggle(uiStatic("啟用 {} 強化"), isOn: $snippet.curlyEnabled)
+                        Stepper("{} max \(snippet.curlyMax)", value: $snippet.curlyMax, in: 0...12)
+                        Toggle(uiStatic("啟用數值權重"), isOn: $snippet.weightEnabled)
+                        Slider(value: $snippet.weightMin, in: 0...5, step: 0.1) { Text(uiStatic("最少權重")) }
+                        Text("\(uiStatic("最少權重")) \(snippet.weightMin, specifier: "%.1f")")
+                            .font(.caption)
+                        Slider(value: $snippet.weightMax, in: 0...5, step: 0.1) { Text(uiStatic("最多權重")) }
+                        Text("\(uiStatic("最多權重")) \(snippet.weightMax, specifier: "%.1f")")
+                            .font(.caption)
+                        Slider(value: $snippet.weightBias, in: 0...5, step: 0.1) { Text(uiStatic("權重偏向")) }
+                        Text("\(uiStatic("權重偏向")) \(snippet.weightBias, specifier: "%.1f")")
+                            .font(.caption)
+                    }
+                    Toggle(uiStatic("啟用"), isOn: $snippet.enabled)
+                    Button(role: .destructive) {
+                        snippets = Self.snippetsAfterDeleting(id: snippet.id, from: snippets)
+                    } label: {
+                        Label(uiStatic("刪除片段"), systemImage: "trash")
+                    }
                 }
             }
             .onDelete { offsets in
-                snippets.remove(atOffsets: offsets)
+                snippets.remove(atValidOffsets: offsets)
             }
-            Button("新增") {
-                snippets.append(NovelAIPromptSnippet(name: "snippet_\(snippets.count + 1)"))
+            Button(uiStatic("新增")) {
+                snippets.append(NovelAIPromptSnippet(name: isRandom ? "隨機片段 \(snippets.count + 1)" : "固定片段 \(snippets.count + 1)"))
             }
+        }
+    }
+
+    static func snippetsAfterDeleting(id: String, from snippets: [NovelAIPromptSnippet]) -> [NovelAIPromptSnippet] {
+        snippets.filter { $0.id != id }
+    }
+}
+
+struct NovelAICharacterPositionGrid: View {
+    @Binding var x: Double
+    @Binding var y: Double
+
+    private let columns = Array(repeating: GridItem(.flexible(minimum: 36), spacing: 6), count: 5)
+
+    var body: some View {
+        let current = NovelAICharacterPositionCell(x: x, y: y)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(uiStatic("位置 \(current.label)"))
+                .font(.headline)
+            Text(uiStatic("對齊網頁端 NovelAI 角色位置：R1 C1 是左上，R5 C5 是右下；會送入 V4 char_captions 的 centers。"))
+                .font(.caption)
+                .foregroundStyle(VNTheme.textSecondary)
+            LazyVGrid(columns: columns, spacing: 6) {
+                ForEach(NovelAICharacterPositionCell.allCells) { cell in
+                    Button {
+                        x = cell.x
+                        y = cell.y
+                    } label: {
+                        Text(cell.buttonTitle)
+                            .font(.caption2.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 34)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(cell == current ? VNTheme.accent.opacity(0.82) : VNTheme.panel.opacity(0.34))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(cell == current ? VNTheme.accentSoft : Color.white.opacity(0.18), lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(uiStatic("位置 \(cell.label)"))
+                }
+            }
+            Text("\(uiStatic("目前 centers")): x \(x, specifier: "%.2f"), y \(y, specifier: "%.2f")")
+                .font(.caption2)
+                .foregroundStyle(VNTheme.textSecondary)
         }
     }
 }
 
 struct NovelAICharacterPromptSection: View {
     @Binding var prompts: [NovelAICharacterPrompt]
+    static let usesWebPositionGrid = true
 
     var body: some View {
         Section("Character Prompts") {
             ForEach($prompts) { $prompt in
                 VStack(alignment: .leading, spacing: 8) {
-                    TextField("角色名", text: $prompt.name)
+                    HStack {
+                        TextField(uiStatic("角色名"), text: $prompt.name)
+                        Button {
+                            prompts = Self.promptsAfterMoving(id: prompt.id, direction: -1, from: prompts)
+                        } label: {
+                            Image(systemName: "arrow.up")
+                        }
+                        .disabled(Self.index(of: prompt.id, in: prompts) == 0)
+                        .accessibilityLabel(uiStatic("上移角色 Prompt"))
+                        Button {
+                            prompts = Self.promptsAfterMoving(id: prompt.id, direction: 1, from: prompts)
+                        } label: {
+                            Image(systemName: "arrow.down")
+                        }
+                        .disabled(Self.index(of: prompt.id, in: prompts).map { $0 >= prompts.count - 1 } ?? true)
+                        .accessibilityLabel(uiStatic("下移角色 Prompt"))
+                    }
                     TextEditor(text: $prompt.prompt).frame(minHeight: 90)
-                    Toggle("啟用", isOn: $prompt.enabled)
+                    TextEditor(text: $prompt.negativePrompt).frame(minHeight: 70)
+                        .overlay(alignment: .topLeading) {
+                            if prompt.negativePrompt.isEmpty {
+                                Text("Undesired / Negative Prompt")
+                                    .font(.caption)
+                                    .foregroundStyle(VNTheme.textSecondary)
+                                    .padding(.top, 8)
+                                    .padding(.leading, 5)
+                            }
+                        }
+                    NovelAICharacterPositionGrid(x: $prompt.x, y: $prompt.y)
+                    Toggle(uiStatic("啟用"), isOn: $prompt.enabled)
+                    Button(role: .destructive) {
+                        prompts = Self.promptsAfterDeleting(id: prompt.id, from: prompts)
+                    } label: {
+                        Label(uiStatic("刪除角色 Prompt"), systemImage: "trash")
+                    }
                 }
             }
             .onDelete { offsets in
-                prompts.remove(atOffsets: offsets)
+                prompts.remove(atValidOffsets: offsets)
             }
-            Button("新增角色 Prompt") {
+            Button(uiStatic("新增角色 Prompt")) {
                 prompts.append(NovelAICharacterPrompt(name: "角色 \(prompts.count + 1)"))
             }
         }
+    }
+
+    static func promptsAfterDeleting(id: String, from prompts: [NovelAICharacterPrompt]) -> [NovelAICharacterPrompt] {
+        prompts.filter { $0.id != id }
+    }
+
+    static func index(of id: String, in prompts: [NovelAICharacterPrompt]) -> Int? {
+        prompts.firstIndex { $0.id == id }
+    }
+
+    static func promptsAfterMoving(id: String, direction: Int, from prompts: [NovelAICharacterPrompt]) -> [NovelAICharacterPrompt] {
+        guard let index = index(of: id, in: prompts) else { return prompts }
+        let newIndex = min(prompts.count - 1, max(0, index + direction))
+        guard index != newIndex else { return prompts }
+        var next = prompts
+        next.swapAt(index, newIndex)
+        return next
     }
 }
 
@@ -1783,9 +2737,10 @@ struct NovelAIReferencePanel: View {
 
     var body: some View {
         Form {
+            NovelAITargetedImageImportSection(settings: $settings)
             NovelAIReferenceSection(title: "Vibe Transfer", references: $settings.vibeTransferImages, type: "vibe")
             Section("Image2Image") {
-                ImagePickerButton(title: settings.imageToImageImageData == nil ? "選擇底圖" : "更換底圖") { data in
+                ImagePickerButton(title: settings.imageToImageImageData == nil ? uiStatic("選擇底圖") : uiStatic("更換底圖")) { data in
                     settings.imageToImageImageData = data
                 }
                 if let data = settings.imageToImageImageData, let image = UIImage(data: data) {
@@ -1797,7 +2752,7 @@ struct NovelAIReferencePanel: View {
                     Button(role: .destructive) {
                         settings.imageToImageImageData = nil
                     } label: {
-                        Label("移除 Image2Image", systemImage: "trash")
+                        Label(uiStatic("移除 Image2Image"), systemImage: "trash")
                     }
                 }
                 Slider(value: $settings.imageToImageStrength, in: 0...1) {
@@ -1817,6 +2772,143 @@ struct NovelAIReferencePanel: View {
     }
 }
 
+enum NovelAIImageImportTarget: String, CaseIterable, Identifiable {
+    case vibe
+    case imageToImage
+    case precise
+    case metadata
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .vibe: "Vibe Transfer"
+        case .imageToImage: "Image2Image"
+        case .precise: "Precise Reference"
+        case .metadata: "匯入設定"
+        }
+    }
+}
+
+struct NovelAITargetedImageImportResult: Hashable {
+    var settings: NovelAIStudioSettings
+    var statusText: String
+}
+
+struct NovelAITargetedImageImportSection: View {
+    @EnvironmentObject private var store: TimeTavernStore
+    @Binding var settings: NovelAIStudioSettings
+    @State private var selectedItems: [PhotosPickerItem] = []
+    @State private var pendingImages: [Data] = []
+    @State private var showTargetDialog = false
+
+    static let mirrorsWebDropChoiceActions = true
+
+    var body: some View {
+        Section(uiStatic("圖片用途匯入")) {
+            PhotosPicker(selection: $selectedItems, maxSelectionCount: 12, matching: .images) {
+                Label(uiStatic("選擇圖片並指定用途"), systemImage: "photo.stack")
+            }
+            Text(uiStatic("對齊網頁端拖入圖片後的用途選擇：可加入 Vibe Transfer、設定 Image2Image、加入 Precise Reference，或讀取 metadata 還原設定。"))
+                .font(.caption)
+                .foregroundStyle(VNTheme.textSecondary)
+        }
+        .onChange(of: selectedItems) { _, items in
+            guard !items.isEmpty else { return }
+            Task {
+                let images = await Self.imageData(from: items)
+                await MainActor.run {
+                    pendingImages = images
+                    selectedItems = []
+                    showTargetDialog = !images.isEmpty
+                    if images.isEmpty {
+                        store.statusText = uiStatic("沒有讀取到可用圖片。")
+                    }
+                }
+            }
+        }
+        .confirmationDialog(uiStatic("選擇圖片用途"), isPresented: $showTargetDialog, titleVisibility: .visible) {
+            ForEach(NovelAIImageImportTarget.allCases) { target in
+                Button(target.title) {
+                    apply(target)
+                }
+            }
+            Button(uiStatic("取消"), role: .cancel) {
+                pendingImages = []
+            }
+        } message: {
+            Text(pendingImages.count > 1 ? uiStatic("已選擇 \(pendingImages.count) 張圖片。") : uiStatic("已選擇 1 張圖片。"))
+        }
+    }
+
+    private func apply(_ target: NovelAIImageImportTarget) {
+        let result = Self.apply(target: target, images: pendingImages, to: settings)
+        settings = result.settings
+        store.statusText = result.statusText
+        pendingImages = []
+    }
+
+    static func apply(
+        target: NovelAIImageImportTarget,
+        images: [Data],
+        to currentSettings: NovelAIStudioSettings
+    ) -> NovelAITargetedImageImportResult {
+        guard !images.isEmpty else {
+            return NovelAITargetedImageImportResult(settings: currentSettings, statusText: uiStatic("沒有讀取到可用圖片。"))
+        }
+        var next = currentSettings
+        switch target {
+        case .vibe:
+            let baseCount = next.vibeTransferImages.count
+            next.vibeTransferImages.append(contentsOf: images.enumerated().map { index, data in
+                NovelAIReferenceImage(
+                    name: "Vibe Transfer \(baseCount + index + 1)",
+                    type: "vibe",
+                    imageData: data,
+                    strength: 0.6,
+                    noise: 1,
+                    enabled: true
+                )
+            })
+            return NovelAITargetedImageImportResult(settings: next, statusText: uiStatic("已加入 \(images.count) 張 Vibe Transfer 圖片。"))
+        case .imageToImage:
+            next.imageToImageImageData = images[0]
+            return NovelAITargetedImageImportResult(settings: next, statusText: uiStatic("已設定 Image2Image 圖片。"))
+        case .precise:
+            let baseCount = next.preciseReferenceImages.count
+            next.preciseReferenceImages.append(contentsOf: images.enumerated().map { index, data in
+                NovelAIReferenceImage(
+                    name: "Precise Reference \(baseCount + index + 1)",
+                    type: "precise",
+                    imageData: data,
+                    strength: 1,
+                    noise: 1,
+                    enabled: true
+                )
+            })
+            return NovelAITargetedImageImportResult(settings: next, statusText: uiStatic("已加入 \(images.count) 張 Precise Reference 圖片。"))
+        case .metadata:
+            if let imported = NovelAIClient.importMetadata(fromImageData: images[0], into: next) {
+                return NovelAITargetedImageImportResult(
+                    settings: imported.settings,
+                    statusText: imported.fallbackMessage ?? uiStatic("已從圖片 metadata 還原設定。")
+                )
+            }
+            return NovelAITargetedImageImportResult(settings: next, statusText: uiStatic("這張圖片沒有可讀取的 NovelAI PNG metadata。"))
+        }
+    }
+
+    private static func imageData(from items: [PhotosPickerItem]) async -> [Data] {
+        var images: [Data] = []
+        for item in items {
+            if let data = try? await item.loadTransferable(type: Data.self) {
+                images.append(data)
+            }
+        }
+        return images
+    }
+}
+
 struct NovelAIReferenceSection: View {
     var title: String
     @Binding var references: [NovelAIReferenceImage]
@@ -1826,8 +2918,8 @@ struct NovelAIReferenceSection: View {
         Section(title) {
             ForEach($references) { $reference in
                 VStack(alignment: .leading, spacing: 8) {
-                    TextField("名稱", text: $reference.name)
-                    Toggle("啟用", isOn: $reference.enabled)
+                    TextField(uiStatic("名稱"), text: $reference.name)
+                    Toggle(uiStatic("啟用"), isOn: $reference.enabled)
                     Slider(value: $reference.strength, in: 0...1) { Text("Strength") }
                     Text("Strength \(reference.strength, specifier: "%.2f")")
                         .font(.caption)
@@ -1841,18 +2933,27 @@ struct NovelAIReferenceSection: View {
                             .frame(maxHeight: 180)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
-                    ImagePickerButton(title: reference.imageData == nil ? "選擇圖片" : "更換圖片") { data in
+                    ImagePickerButton(title: reference.imageData == nil ? uiStatic("選擇圖片") : uiStatic("更換圖片")) { data in
                         reference.imageData = data
+                    }
+                    Button(role: .destructive) {
+                        references = Self.referencesAfterDeleting(id: reference.id, from: references)
+                    } label: {
+                        Label(uiStatic("刪除圖片"), systemImage: "trash")
                     }
                 }
             }
             .onDelete { offsets in
-                references.remove(atOffsets: offsets)
+                references.remove(atValidOffsets: offsets)
             }
-            Button("新增 Reference") {
+            Button(uiStatic("新增 Reference")) {
                 references.append(NovelAIReferenceImage(name: "\(title) \(references.count + 1)", type: type))
             }
         }
+    }
+
+    static func referencesAfterDeleting(id: String, from references: [NovelAIReferenceImage]) -> [NovelAIReferenceImage] {
+        references.filter { $0.id != id }
     }
 }
 
@@ -1863,7 +2964,7 @@ struct ImagePickerButton: View {
 
     var body: some View {
         PhotosPicker(selection: $item, matching: .images) {
-            Label(title, systemImage: "photo")
+            Label(uiStatic(title), systemImage: "photo")
         }
         .onChange(of: item) { _, newValue in
             guard let newValue else { return }
@@ -1882,7 +2983,7 @@ struct NovelAIOutputPanel: View {
 
     var body: some View {
         Form {
-            Section("尺寸") {
+            Section(uiStatic("尺寸")) {
                 Picker("Preset", selection: $settings.sizePreset) {
                     Text("Portrait").tag("portrait")
                     Text("Landscape").tag("landscape")
@@ -1892,8 +2993,8 @@ struct NovelAIOutputPanel: View {
                 .onChange(of: settings.sizePreset) { _, value in
                     applySizePreset(value)
                 }
-                Stepper("寬 \(settings.imageSettings.width)", value: $settings.imageSettings.width, in: 512...1536, step: 64)
-                Stepper("高 \(settings.imageSettings.height)", value: $settings.imageSettings.height, in: 512...1536, step: 64)
+                Stepper(uiStatic("寬 \(settings.imageSettings.width)"), value: $settings.imageSettings.width, in: 512...1536, step: 64)
+                Stepper(uiStatic("高 \(settings.imageSettings.height)"), value: $settings.imageSettings.height, in: 512...1536, step: 64)
                 Stepper("Samples \(settings.imageSettings.samples)", value: $settings.imageSettings.samples, in: 1...8)
             }
             Section("AI Settings") {
@@ -1905,40 +3006,75 @@ struct NovelAIOutputPanel: View {
                 Slider(value: $settings.imageSettings.cfgRescale, in: 0...1.5) { Text("CFG Rescale") }
                 Text("CFG Rescale \(settings.imageSettings.cfgRescale, specifier: "%.2f")")
                     .font(.caption)
-                TextField("Sampler", text: $settings.imageSettings.sampler)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                TextField("Noise Schedule", text: $settings.imageSettings.noiseSchedule)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
+                Picker("Sampler", selection: $settings.imageSettings.sampler) {
+                    ForEach(NovelAIOptionLists.samplerOptions, id: \.id) { option in
+                        Text(option.title).tag(option.id)
+                    }
+                }
+                Picker("Noise Schedule", selection: $settings.imageSettings.noiseSchedule) {
+                    ForEach(NovelAIOptionLists.noiseScheduleOptions, id: \.id) { option in
+                        Text(option.title).tag(option.id)
+                    }
+                }
                 Toggle("Variety+", isOn: $settings.imageSettings.varietyPlus)
                 TextField("Seed", text: seedBinding)
                     .keyboardType(.numberPad)
-                Stepper("Loop \(settings.loopCount)", value: $settings.loopCount, in: 1...20)
+            }
+            Section(uiStatic("成本預估")) {
+                Label(uiStatic("約 \(NovelAIClient.estimatedAnlas(for: settings)) Anlas"), systemImage: "creditcard")
+                    .font(.headline)
+                Text(uiStatic("按網頁端公式本地估算：尺寸、Steps、Samples、Image2Image、Vibe Transfer 與 Precise Reference 都會影響結果；實際扣除以 NovelAI 為準。"))
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
             }
             Section("Metadata Import") {
+                ImagePickerButton(title: uiStatic("選擇圖片讀取 metadata")) { data in
+                    if let result = NovelAIClient.importMetadata(fromImageData: data, into: settings) {
+                        settings = result.settings
+                        store.statusText = result.fallbackMessage ?? uiStatic("已從圖片 metadata 還原設定。")
+                    } else {
+                        store.statusText = uiStatic("這張圖片沒有可讀取的 NovelAI PNG metadata。")
+                    }
+                }
+                Text(uiStatic("支援網頁端寫入的 NovelAIMetadata / TimeTavernNovelAIMetadata，以及 NovelAI 原生 Comment。"))
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
                 TextEditor(text: $settings.metadataDraft)
                     .frame(minHeight: 110)
-                Button("套用 Metadata") {
+                Button(uiStatic("套用 Metadata")) {
                     let result = NovelAIClient.importMetadata(settings.metadataDraft, into: settings)
                     settings = result.settings
                     if let fallback = result.fallbackMessage {
                         store.statusText = fallback
                     } else {
-                        store.statusText = "Metadata 已套用。"
+                        store.statusText = uiStatic("Metadata 已套用。")
                     }
                 }
             }
             Section("Generate") {
+                Stepper(uiStatic("生成數量 \(loopCountTitle)"), value: $settings.loopCount, in: 0...9999)
+                Text(uiStatic("0 代表一直生成，直到按 Stop Loop；每次生成完成後會短暫等待再開始下一次。"))
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
                 Button {
                     store.generateNovelAIImage(studioSettings: settings)
                 } label: {
-                    Label("生成圖片", systemImage: "sparkles")
+                    Label(store.isNovelAIGenerating && !store.isNovelAILoopRunning ? uiStatic("生成中...") : "Generate", systemImage: "sparkles")
                 }
-                .disabled(!NovelAIView.canGenerate(settings: settings, key: store.novelAIKey))
+                .disabled(!NovelAIView.canGenerate(settings: settings, key: store.novelAIKey) || store.isNovelAIGenerating)
+                Button {
+                    store.loopGenerateNovelAIImages(studioSettings: settings)
+                } label: {
+                    Label(store.isNovelAILoopRunning ? "Stop Loop" : "Loop Generate", systemImage: store.isNovelAILoopRunning ? "stop.fill" : "repeat")
+                }
+                .disabled(!store.isNovelAILoopRunning && (!NovelAIView.canGenerate(settings: settings, key: store.novelAIKey) || store.isNovelAIGenerating))
             }
         }
         .visualNovelListChrome()
+    }
+
+    private var loopCountTitle: String {
+        settings.loopCount == 0 ? "∞" : "\(settings.loopCount)"
     }
 
     private var seedBinding: Binding<String> {
@@ -1989,10 +3125,16 @@ struct NovelAIHistoryPanel: View {
                         Spacer()
                         if let url = Self.exportURL(for: item) {
                             ShareLink(item: url) {
-                                Label("匯出", systemImage: "square.and.arrow.up")
+                                Label(uiStatic("匯出"), systemImage: "square.and.arrow.up")
                             }
                             .font(.caption)
                         }
+                        Button(role: .destructive) {
+                            store.deleteNovelAIAlbumItem(id: item.id)
+                        } label: {
+                            Label(uiStatic("刪除"), systemImage: "trash")
+                        }
+                        .font(.caption)
                     }
                 }
             }
@@ -2006,6 +3148,40 @@ struct NovelAIHistoryPanel: View {
         try? item.imageData.write(to: url)
         return url
     }
+
+    static func itemsAfterDeleting(id: String, from items: [NovelAIAlbumItem]) -> [NovelAIAlbumItem] {
+        items.filter { $0.id != id }
+    }
+}
+
+struct TimeTrackingWordListEditor: View {
+    var title: String
+    var help: String
+    var examples: String
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(uiStatic(title))
+                .font(.headline)
+            Text(uiStatic(help))
+                .font(.caption)
+                .foregroundStyle(VNTheme.textSecondary)
+            Text(uiStatic("例：\(examples)"))
+                .font(.caption2)
+                .foregroundStyle(VNTheme.textSecondary)
+            TextEditor(text: $text)
+                .frame(minHeight: 72)
+                .overlay(alignment: .topLeading) {
+                    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(uiStatic(examples.replacingOccurrences(of: " / ", with: "\n")))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+                            .padding(6)
+                    }
+                }
+        }
+    }
 }
 
 struct SettingsView: View {
@@ -2014,88 +3190,193 @@ struct SettingsView: View {
     @State private var showModeJSONImporter = false
     @State private var showRestoreDefaultsConfirm = false
 
+    static let deepSeekMultiKeyHelp = "可加入多條 DeepSeek API key。主聊天會在已填 key 間輪流使用；Key 2+ 保留作處理/壓縮用途，對齊網頁端 CHAT_API_KEY2、DEEPSEEK_API_KEY2 的設計。"
+    static let deepSeekCacheHitHelp = "DeepSeek 的 prompt cache 由服務端自動計算。當 system prompt、角色卡、壓縮內容等前綴保持穩定時，usage 可能回傳 Cache Hit / Cache Miss；AI Logs 會顯示命中率。不同 key 或帳號的 cache 統計可能不共用。"
+    static let roleCardImportSymbolName = "person.crop.square"
+    static let uiLanguageHelp = "對齊網頁端簡繁轉換：只影響 app UI 顯示；不會改寫角色卡、Prompt、對話、AI logs 或匯入匯出的 JSON。"
+    static let timeTrackingUsageHelp = [
+        "配合詞與 +1天關鍵字在 5 字內時，會自動 +1 天，例如「現在第二天早上」。",
+        "配合詞與「3天後 / 三天後」在 5 字內時，會自動加對應天數，例如「已經三天後的晚上」。",
+        "配合詞與「第3天」在 5 字內時，會直接把天數改成第 3 天，例如「現在第3天中午」。",
+        "開場對話與用戶所有輸入可以不用配合詞直接更改時間；AI 生成內容需要配合詞輔助判斷。",
+        "不改詞與配合詞在 5 字內時，本次不會改天數，也不會改早中晚，例如「等到早上再說」。",
+        "自動切換會按早上→中午→晚上→早上前進，晚上→早上會自動 +1 天；可在對話加入 {保持時間} 延後目前設定的回合數。"
+    ]
+
     var body: some View {
         NavigationStack {
             Form {
+                Section(header: Text(ui("顯示"))) {
+                    Picker(ui("UI 語言"), selection: $store.state.uiLanguage) {
+                        ForEach(UILanguageMode.allCases) { language in
+                            Text(language.title(in: store.state.uiLanguage)).tag(language)
+                        }
+                    }
+                    Text(ui(Self.uiLanguageHelp))
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
+                    Text(ui("預覽：簡繁轉換會把 UI 顯示成繁體或簡體。"))
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
+                }
                 Section("DeepSeek") {
-                    SecureField("DeepSeek API Key", text: $store.deepSeekKey)
+                    Text(Self.deepSeekMultiKeyHelp)
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
+                    SecureField(uiStatic("主 DeepSeek API Key"), text: $store.deepSeekKey)
+                    ForEach(Array(store.deepSeekProcessingKeys.indices), id: \.self) { index in
+                        HStack {
+                            SecureField("DeepSeek API Key \(index + 2)", text: processingKeyBinding(index))
+                            Button(role: .destructive) {
+                                guard store.deepSeekProcessingKeys.indices.contains(index) else { return }
+                                store.deepSeekProcessingKeys.remove(at: index)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(uiStatic("刪除 DeepSeek API Key \(index + 2)"))
+                        }
+                    }
+                    Button {
+                        store.deepSeekProcessingKeys.append("")
+                    } label: {
+                        Label(uiStatic("新增 DeepSeek API Key"), systemImage: "plus")
+                    }
+                    Text(Self.deepSeekCacheHitHelp)
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
                     TextField("Base URL", text: $store.state.apiSettings.deepSeekBaseURL)
                     TextField("Model", text: $store.state.apiSettings.deepSeekModel)
                     Stepper("Max Tokens \(store.state.apiSettings.maxTokens)", value: $store.state.apiSettings.maxTokens, in: 512...64000, step: 512)
                     Slider(value: $store.state.apiSettings.temperature, in: 0...1.5) { Text("Temperature") }
-                    Button("測試 DeepSeek") { store.testDeepSeek() }
+                    Button(uiStatic("測試 DeepSeek")) { store.testDeepSeek() }
                 }
                 Section("NovelAI") {
                     SecureField("NovelAI API Token", text: $store.novelAIKey)
                     TextField("Image API", text: $store.state.apiSettings.naiImageBaseURL)
                     TextField("Primary API", text: $store.state.apiSettings.naiPrimaryBaseURL)
-                    Button("測試 NovelAI") { store.testNovelAI() }
+                    Button(uiStatic("測試 NovelAI")) { store.testNovelAI() }
                 }
-                Section("使用者") {
-                    TextField("稱呼", text: $store.state.userProfile.userName)
+                Section(uiStatic("使用者")) {
+                    TextField(uiStatic("稱呼"), text: $store.state.userProfile.userName)
                     TextEditor(text: $store.state.userProfile.extraPrompt).frame(minHeight: 90)
                 }
-                Section("時間追蹤") {
-                    Toggle("啟用", isOn: $store.state.timeTracking.enabled)
-                    Stepper("第 \(store.state.timeTracking.day) 天", value: $store.state.timeTracking.day, in: 1...9999)
-                    TextField("時段", text: $store.state.timeTracking.period)
-                    Stepper("每 \(store.state.timeTracking.autoAdvanceRounds) 輪切換", value: $store.state.timeTracking.autoAdvanceRounds, in: 1...20)
+                Section(uiStatic("時間追蹤")) {
+                    Toggle(uiStatic("啟用"), isOn: $store.state.timeTracking.enabled)
+                    Stepper(uiStatic("第 \(store.state.timeTracking.currentDayNumber) 天"), value: $store.state.timeTracking.currentDayNumber, in: 1...9999)
+                    Stepper(uiStatic("\(store.state.timeTracking.currentYear) 年"), value: $store.state.timeTracking.currentYear, in: 1...9999)
+                    Stepper(uiStatic("\(store.state.timeTracking.currentMonth) 月"), value: $store.state.timeTracking.currentMonth, in: 1...12)
+                    Stepper(uiStatic("\(store.state.timeTracking.currentDate) 日"), value: $store.state.timeTracking.currentDate, in: 1...31)
+                    Picker(uiStatic("當前時間"), selection: $store.state.timeTracking.currentPeriod) {
+                        ForEach(TimeTrackingPeriod.allCases) { period in
+                            Text(period.title).tag(period.rawValue)
+                        }
+                    }
+                    Toggle(uiStatic("自動早中晚切換"), isOn: $store.state.timeTracking.autoPeriod.enabled)
+                    Stepper(uiStatic("每 \(store.state.timeTracking.autoPeriod.roundsPerPeriod) 回合切換"), value: $store.state.timeTracking.autoPeriod.roundsPerPeriod, in: 1...20)
+                    Text(uiStatic("目前計數 \(store.state.timeTracking.autoPeriod.turnsSinceChange) / \(store.state.timeTracking.autoPeriod.roundsPerPeriod)。輸入 {保持時間} 會重置計數。"))
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
+                    ForEach(Self.timeTrackingUsageHelp, id: \.self) { help in
+                        Text(help)
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+                    }
+                    TimeTrackingWordListEditor(
+                        title: "+1 天關鍵字",
+                        help: "命中後加一天；配合詞在附近時最穩定，用戶輸入與開場可直接命中。",
+                        examples: "下一天 / 第二天 / 隔天 / 明天",
+                        text: wordListBinding(\.nextDayWords)
+                    )
+                    TimeTrackingWordListEditor(
+                        title: "配合詞",
+                        help: "用來確認句子真的在描述時間變化；和第 N 天、N 天後、早中晚詞靠近時才觸發。",
+                        examples: "來到 / 已經 / 現在 / 到了",
+                        text: wordListBinding(\.connectorWords)
+                    )
+                    TimeTrackingWordListEditor(
+                        title: "不改詞",
+                        help: "阻止誤判。它和配合詞靠近時，本次不改天數，也不改早中晚。",
+                        examples: "等到 / 等一下 / 的時候",
+                        text: wordListBinding(\.noChangeWords)
+                    )
+                    TimeTrackingWordListEditor(
+                        title: "早上欄位",
+                        help: "命中後把當前時間設為早上；如果原本是晚上，切到早上會順便 +1 天。",
+                        examples: "早上 / 早晨 / 早餐",
+                        text: wordListBinding(\.morningWords)
+                    )
+                    TimeTrackingWordListEditor(
+                        title: "中午欄位",
+                        help: "命中後把當前時間設為中午或下午，用於午餐、下午等描述。",
+                        examples: "中午 / 下午 / 午餐",
+                        text: wordListBinding(\.noonWords)
+                    )
+                    TimeTrackingWordListEditor(
+                        title: "晚上欄位",
+                        help: "命中後把當前時間設為晚上，用於夜晚、晚餐、深夜等描述。",
+                        examples: "晚上 / 夜晚 / 晚餐",
+                        text: wordListBinding(\.eveningWords)
+                    )
                 }
-                Section("JSON 匯入") {
+                Section(uiStatic("JSON / 圖片匯入")) {
                     Button {
                         showRoleJSONImporter = true
                     } label: {
-                        Label("匯入角色卡 JSON", systemImage: "person.crop.square.badge.plus")
+                        Label(uiStatic("匯入角色卡 JSON / PNG / JPG"), systemImage: Self.roleCardImportSymbolName)
                     }
+                    Text(uiStatic("支援網頁端 JSON、SillyTavern chara_card_v2，以及含角色卡 metadata 的 PNG/JPG。"))
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
                     Button {
                         showModeJSONImporter = true
                     } label: {
-                        Label("匯入模式 JSON", systemImage: "slider.horizontal.below.square.filled.and.square")
+                        Label(uiStatic("匯入模式 JSON"), systemImage: "slider.horizontal.below.square.filled.and.square")
                     }
                 }
-                Section("預設") {
+                Section(uiStatic("預設")) {
                     if let localDefaults = store.state.localDefaults {
-                        Text("本機預設：\(localDefaults.roleCards.count) 張角色卡、\(localDefaults.promptModes.count) 個 Prompt 模式。")
+                        Text(uiStatic("本機預設：\(localDefaults.roleCards.count) 張角色卡、\(localDefaults.promptModes.count) 個 Prompt 模式。"))
                             .font(.caption)
                             .foregroundStyle(VNTheme.textSecondary)
                     } else if let summary = store.bundledWebDefaultsSummary() {
-                        Text("尚未保存本機預設。可回落網頁 bundle 預設：\(summary.roleCardCount) 張角色卡、\(summary.promptModeCount) 個 Prompt 模式。使用者：\(summary.userDisplayName)。")
+                        Text(uiStatic("尚未保存本機預設。可回落網頁 bundle 預設：\(summary.roleCardCount) 張角色卡、\(summary.promptModeCount) 個 Prompt 模式。使用者：\(summary.userDisplayName)。"))
                             .font(.caption)
                             .foregroundStyle(VNTheme.textSecondary)
                     } else {
-                        Text("尚未保存本機預設，且找不到 bundle 內的網頁預設。")
+                        Text(uiStatic("尚未保存本機預設，且找不到 bundle 內的網頁預設。"))
                             .font(.caption)
                             .foregroundStyle(VNTheme.textSecondary)
                     }
                     Button {
                         store.saveCurrentAsLocalDefaults()
                     } label: {
-                        Label("儲存目前為預設", systemImage: "tray.and.arrow.down.fill")
+                        Label(uiStatic("儲存目前為預設"), systemImage: "tray.and.arrow.down.fill")
                     }
                     Button(role: .destructive) {
                         showRestoreDefaultsConfirm = true
                     } label: {
-                        Label("還原預設", systemImage: "arrow.counterclockwise")
+                        Label(uiStatic("還原預設"), systemImage: "arrow.counterclockwise")
                     }
                 }
                 if !store.statusText.isEmpty {
-                    Section("狀態") {
+                    Section(uiStatic("狀態")) {
                         Text(store.statusText)
                     }
                 }
             }
             .visualNovelListChrome()
-            .navigationTitle("設定")
+            .navigationTitle(uiStatic("設定"))
             .toolbar {
-                Button("保存") {
+                Button(uiStatic("保存")) {
                     store.saveSecrets()
                     store.persist()
                 }
             }
-            .fileImporter(isPresented: $showRoleJSONImporter, allowedContentTypes: [.json]) { result in
+            .fileImporter(isPresented: $showRoleJSONImporter, allowedContentTypes: [.json, .png, .jpeg]) { result in
                 if case let .success(url) = result {
                     _ = url.startAccessingSecurityScopedResource()
-                    store.importRoleCardJSON(url: url)
+                    store.importRoleCardFile(url: url)
                     url.stopAccessingSecurityScopedResource()
                 }
             }
@@ -2106,15 +3387,48 @@ struct SettingsView: View {
                     url.stopAccessingSecurityScopedResource()
                 }
             }
-            .alert("還原預設？", isPresented: $showRestoreDefaultsConfirm) {
-                Button("取消", role: .cancel) {}
-                Button("還原", role: .destructive) {
+            .alert(uiStatic("還原預設？"), isPresented: $showRestoreDefaultsConfirm) {
+                Button(uiStatic("取消"), role: .cancel) {}
+                Button(uiStatic("還原"), role: .destructive) {
                     store.restoreDefaultsPreferLocal()
                 }
             } message: {
-                Text("會覆蓋角色卡、Prompt 模式、使用者資料、時間追蹤、API 與 NovelAI 設定；Keychain、相簿、AI logs、saved sessions 會保留，並建立還原前備份。")
+                Text(uiStatic("會覆蓋角色卡、Prompt 模式、使用者資料、時間追蹤、API 與 NovelAI 設定；Keychain、相簿、AI logs、saved sessions 會保留，並建立還原前備份。"))
             }
         }
+    }
+
+    static func localizedDisplayText(_ text: String, language: UILanguageMode) -> String {
+        UIChineseTextConverter.convert(text, language: language)
+    }
+
+    private func ui(_ text: String) -> String {
+        Self.localizedDisplayText(text, language: store.state.uiLanguage)
+    }
+
+    private func processingKeyBinding(_ index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                guard store.deepSeekProcessingKeys.indices.contains(index) else { return "" }
+                return store.deepSeekProcessingKeys[index]
+            },
+            set: { value in
+                guard store.deepSeekProcessingKeys.indices.contains(index) else { return }
+                store.deepSeekProcessingKeys[index] = value
+            }
+        )
+    }
+
+    private func wordListBinding(_ keyPath: WritableKeyPath<TimeTrackingRulesConfig, [String]>) -> Binding<String> {
+        Binding(
+            get: { store.state.timeTracking.config[keyPath: keyPath].joined(separator: "\n") },
+            set: { value in
+                store.state.timeTracking.config[keyPath: keyPath] = value
+                    .split(whereSeparator: { "\n,，、;；|/／".contains($0) })
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            }
+        )
     }
 }
 
@@ -2124,16 +3438,91 @@ struct LogView: View {
     var body: some View {
         NavigationStack {
             List(store.state.aiLogs) { log in
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("\(log.purpose) · \(log.model)").font(.headline)
-                    Text(log.status).font(.caption).foregroundStyle(log.status == "error" ? .red : VNTheme.textSecondary)
-                    if !log.error.isEmpty { Text(log.error).foregroundStyle(.red) }
-                    Text(log.responsePreview).font(.caption).lineLimit(8)
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !log.usageSummary.isEmpty {
+                            logBlock(title: uiStatic("本次 Token 消耗"), text: log.usageSummary, accent: VNTheme.accentSoft)
+                        }
+                        logBlock(
+                            title: uiStatic("送給 AI 的內容"),
+                            text: Self.formatMessages(log.requestMessages)
+                        )
+                        if !log.debugReasoningContent.isEmpty {
+                            logBlock(title: uiStatic("模型思考過程"), text: log.debugReasoningContent, accent: VNTheme.textSecondary)
+                        }
+                        logBlock(
+                            title: log.error.isEmpty ? uiStatic("AI 輸出") : uiStatic("AI 輸出 / 錯誤內容"),
+                            text: log.error.isEmpty ? log.responseText : "\(log.responseText)\n\n[Error]\n\(log.error)",
+                            accent: log.error.isEmpty ? .white : .red
+                        )
+                    }
+                    .padding(.vertical, 8)
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("\(Self.formatPurpose(log.purpose))｜\(log.model.isEmpty ? uiStatic("未指定模型") : log.model)")
+                            .font(.headline)
+                        HStack(spacing: 8) {
+                            Text(Self.formatStatus(log.status))
+                                .font(.caption)
+                                .foregroundStyle(log.status == "error" ? .red : VNTheme.textSecondary)
+                            if !log.usageSummary.isEmpty {
+                                Text(log.usageSummary)
+                                    .font(.caption)
+                                    .foregroundStyle(VNTheme.accentSoft)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Text(log.responsePreview.isEmpty ? log.responseText : log.responsePreview)
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+                            .lineLimit(3)
+                    }
                 }
             }
             .visualNovelListChrome()
             .navigationTitle("AI Logs")
         }
+    }
+
+    @ViewBuilder
+    private func logBlock(title: String, text: String, accent: Color = .white) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VNTheme.accentSoft)
+            Text(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? uiStatic("無") : text)
+                .font(.caption.monospaced())
+                .foregroundStyle(accent)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(VNTheme.panel.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    static func formatPurpose(_ purpose: String) -> String {
+        if purpose.hasPrefix("context_compression") {
+            return uiStatic("模型內容處理")
+        }
+        if purpose == "chat_expand" {
+            return uiStatic("補寫")
+        }
+        return uiStatic("正文輸出")
+    }
+
+    static func formatStatus(_ status: String) -> String {
+        if status == "error" { return uiStatic("失敗") }
+        if status == "skipped" { return uiStatic("略過") }
+        return uiStatic("成功")
+    }
+
+    static func formatMessages(_ messages: [ChatAPIMessage]) -> String {
+        guard !messages.isEmpty else { return uiStatic("無") }
+        return messages.enumerated()
+            .map { index, message in
+                "#\(index + 1) \(message.role)\n\(message.content.isEmpty ? uiStatic("(空白)") : message.content)"
+            }
+            .joined(separator: "\n\n----------------\n\n")
     }
 }
 
@@ -2152,9 +3541,9 @@ struct ModelContentView: View {
                 }
             }
             .visualNovelListChrome()
-            .navigationTitle("模型內容")
+            .navigationTitle(uiStatic("模型內容"))
             .toolbar {
-                Button("保存") { store.persist() }
+                Button(uiStatic("保存")) { store.persist() }
             }
         }
     }
@@ -2169,17 +3558,17 @@ struct RunTimeView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Stepper("輪數 \(turns)", value: $turns, in: 1...20)
+                Stepper(uiStatic("輪數 \(turns)"), value: $turns, in: 1...20)
                 TextEditor(text: $message).frame(minHeight: 160)
             }
             .visualNovelListChrome()
-            .navigationTitle("自動推演")
+            .navigationTitle(uiStatic("自動推演"))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button(uiStatic("取消")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("開始") {
+                    Button(uiStatic("開始")) {
                         store.runTime(turns: turns, seedMessage: message)
                         dismiss()
                     }
