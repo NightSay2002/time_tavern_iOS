@@ -13,6 +13,20 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertTrue(VisualNovelComposer.isSendDisabled(isGenerating: false, text: "   \n"))
         XCTAssertFalse(VisualNovelComposer.isSendDisabled(isGenerating: false, text: "開始故事"))
         XCTAssertFalse(VisualNovelComposer.isSendDisabled(isGenerating: true, text: ""))
+        XCTAssertTrue(VisualNovelComposer.shouldDismissInputAfterPrimaryAction(isGenerating: false, text: "開始故事"))
+        XCTAssertFalse(VisualNovelComposer.shouldDismissInputAfterPrimaryAction(isGenerating: false, text: "   \n"))
+        XCTAssertFalse(VisualNovelComposer.shouldDismissInputAfterPrimaryAction(isGenerating: true, text: "停止生成"))
+    }
+
+    func testChatOutsideTapDismissesComposerOnlyWhenFocused() {
+        XCTAssertTrue(ChatView.shouldDismissComposerOnOutsideTap(isFocused: true))
+        XCTAssertFalse(ChatView.shouldDismissComposerOnOutsideTap(isFocused: false))
+    }
+
+    func testTriggerTurnListParsesWebStyleWhitespaceAndPunctuation() {
+        XCTAssertEqual(TriggerActionEditorView.parseTurnList("5 10 15 20"), [5, 10, 15, 20])
+        XCTAssertEqual(TriggerActionEditorView.parseTurnList("20, 5，10、15;20"), [5, 10, 15, 20])
+        XCTAssertEqual(TriggerActionEditorView.parseTurnList("bad -1 0 5"), [0, 5])
     }
 
     func testUILanguageToggleMatchesWebSimplifiedConversionAndPersists() throws {
@@ -33,9 +47,15 @@ final class TimeTavernTests: XCTestCase {
         let encoded = try JSONEncoder().encode(state)
         let decoded = try JSONDecoder().decode(AppState.self, from: encoded)
         let legacy = try JSONDecoder().decode(AppState.self, from: Data(#"{"userProfile":{"userName":"u"}}"#.utf8))
+        let webProfile = try JSONDecoder().decode(
+            UserProfile.self,
+            from: Data(#"{"displayName":"旅人","identityText":"玩家補充"}"#.utf8)
+        )
 
         XCTAssertEqual(decoded.uiLanguage, .simplified)
         XCTAssertEqual(legacy.uiLanguage, .traditional)
+        XCTAssertEqual(webProfile.userName, "旅人")
+        XCTAssertEqual(webProfile.extraPrompt, "玩家補充")
     }
 
     func testStaticChineseUILabelsUseDisplayConverter() throws {
@@ -148,6 +168,19 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(store.state.activeRoleCardId, "")
         XCTAssertEqual(store.state.activeAssistantMode, AssistantCard.characterCardCreationAssistantID)
         XCTAssertEqual(store.state.conversation, [])
+    }
+
+    @MainActor
+    func testStartRoleCardRendersOpeningTemplateForDisplayedConversation() {
+        let store = TimeTavernStore()
+        var card = RoleCard(id: "role_1", name: "千夜")
+        card.openingDialogues = [OpeningDialogue(id: "opening", name: "開場", content: "{{ user }} 進門，{{chur}} 遞上酒。")]
+        card.activeOpeningDialogueId = "opening"
+        store.state.userProfile.userName = "旅人"
+
+        store.start(roleCard: card)
+
+        XCTAssertEqual(store.state.conversation.first?.content, "旅人 進門，千夜 遞上酒。")
     }
 
     @MainActor
@@ -268,6 +301,115 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertTrue(messages.last?.content.contains("【觸發世界書 Lorebooks】") == true)
         XCTAssertTrue(messages.last?.content.contains("古井連接舊時間線") == true)
         XCTAssertTrue(messages.last?.content.contains("【使用者自訂補充】") == true)
+    }
+
+    func testUserPlaceholderRendersAcrossRoleCardOpeningLorebookAndCompressionSummary() throws {
+        var state = AppState()
+        var card = RoleCard()
+        card.name = "千夜"
+        card.promptModeId = "multi"
+        card.customSections = [
+            CustomSection(name: "{{ USER }}資料", content: "{{ user }} 是 {{chur}} 的客人。")
+        ]
+        card.openingDialogues = [OpeningDialogue(id: "opening", name: "開場", content: "{{ user }} 推門，{{ CHUR }} 抬頭。")]
+        card.activeOpeningDialogueId = "opening"
+        card.lorebooks = [
+            LorebookEntry(title: "{{ user }}祕密", keywords: ["{{ user }}"], content: "{{user}} 命中了 {{chur}} 的世界書。")
+        ]
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+        state.userProfile.userName = "旅人"
+        state.userProfile.extraPrompt = "{{ user }} 的補充"
+        state.promptModes = [
+            PromptModeConfig(
+                id: "multi",
+                name: "多角色",
+                mode: "multi",
+                mainRules: "主要規則給 {{ USER }} 和 {{chur}}",
+                outputRules: "結尾留給 {{ user }}",
+                compressionProfiles: [
+                    CompressionProfile(name: "長期 {{user}}", summary: "{{ user }} 的長期摘要")
+                ]
+            )
+        ]
+        state.conversation = [
+            ConversationMessage(role: .assistant, content: "{{ user }} 推門，{{ CHUR }} 抬頭。", source: "opening"),
+            ConversationMessage(role: .user, content: "旅人靠近古井。", turnNumber: 1),
+            ConversationMessage(role: .assistant, content: "", turnNumber: 1)
+        ]
+
+        let messages = try ConversationEngine().buildPromptMessages(state: state, userInput: "旅人靠近古井。")
+        let requestText = messages.map(\.content).joined(separator: "\n\n")
+
+        XCTAssertFalse(requestText.contains("{{user}}"))
+        XCTAssertFalse(requestText.contains("{{ user }}"))
+        XCTAssertFalse(requestText.contains("{{chur}}"))
+        XCTAssertTrue(messages.first?.content.contains("【旅人資料】") == true)
+        XCTAssertTrue(messages.first?.content.contains("旅人 是 千夜 的客人。") == true)
+        XCTAssertTrue(messages.first?.content.contains("主要規則給 旅人 和 千夜") == true)
+        XCTAssertTrue(messages.first?.content.contains("結尾留給 旅人") == true)
+        XCTAssertTrue(messages.contains { $0.role == "assistant" && $0.content.contains("旅人 推門，千夜 抬頭。") })
+        XCTAssertTrue(messages[1].content.contains("【大模型內容：長期 旅人】"))
+        XCTAssertTrue(messages[1].content.contains("旅人 的長期摘要"))
+        XCTAssertTrue(messages.last?.content.contains("【世界書：旅人祕密】") == true)
+        XCTAssertTrue(messages.last?.content.contains("旅人 命中了 千夜 的世界書。") == true)
+        XCTAssertTrue(messages.last?.content.contains("旅人 的補充") == true)
+    }
+
+    func testCompressionAPIRequestRendersUserPlaceholderLikeWeb() {
+        var state = AppState()
+        var card = RoleCard()
+        card.name = "千夜"
+        card.promptModeId = "multi"
+        card.customSections = [CustomSection(name: "身份", content: "{{user}} 和 {{chur}} 的壓縮角色資料")]
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+        state.userProfile.userName = "旅人"
+        state.conversation = [ConversationMessage(role: .user, content: "整理資料", turnNumber: 1)]
+        state.promptModes = [
+            PromptModeConfig(
+                id: "multi",
+                name: "模式 {{user}}",
+                mode: "multi",
+                compressionProfiles: [
+                    CompressionProfile(
+                        id: "profile",
+                        name: "模型 {{chur}}",
+                        contextScope: .roleAndText,
+                        contextCompression: CompressionContextConfig(
+                            mainRules: "壓縮 {{user}} 與 {{chur}}",
+                            models: [
+                                CompressionModel(
+                                    id: "facts",
+                                    name: "{{user}}資料",
+                                    addRules: "新增 {{user}} 內容",
+                                    deleteRules: "刪除 {{chur}} 過期內容"
+                                )
+                            ]
+                        ),
+                        triggerActions: [
+                            CompressionTriggerAction(triggers: CompressionTriggerConfig(everyTurn: true, roundLimit: false))
+                        ],
+                        summary: "{{user}} 舊摘要"
+                    )
+                ]
+            )
+        ]
+
+        let request = ConversationEngine().compressionAPIRequests(state: state, latestUserInput: "整理資料").first
+        let requestText = request?.messages.map(\.content).joined(separator: "\n\n") ?? ""
+
+        XCTAssertNotNil(request)
+        XCTAssertFalse(requestText.contains("{{user}}"))
+        XCTAssertFalse(requestText.contains("{{chur}}"))
+        XCTAssertTrue(requestText.contains("模式 旅人"))
+        XCTAssertTrue(requestText.contains("模型 千夜"))
+        XCTAssertTrue(requestText.contains("壓縮 旅人 與 千夜"))
+        XCTAssertTrue(requestText.contains("[facts] 旅人資料"))
+        XCTAssertTrue(requestText.contains("新增 旅人 內容"))
+        XCTAssertTrue(requestText.contains("刪除 千夜 過期內容"))
+        XCTAssertTrue(requestText.contains("旅人 和 千夜 的壓縮角色資料"))
+        XCTAssertTrue(requestText.contains("旅人 舊摘要"))
     }
 
     func testAILogEntryPreservesWebStylePayloadFields() throws {

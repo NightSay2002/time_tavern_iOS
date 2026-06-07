@@ -37,6 +37,22 @@ struct CompressionImageRequest: Hashable {
 }
 
 final class ConversationEngine {
+    static func renderTemplate(_ text: String, user: String, role: String) -> String {
+        var output = text
+        [
+            ("user", user),
+            ("chur", role)
+        ].forEach { key, value in
+            let pattern = "\\{\\{\\s*\(NSRegularExpression.escapedPattern(for: key))\\s*\\}\\}"
+            output = output.replacingOccurrences(
+                of: pattern,
+                with: value,
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        return output
+    }
+
     static func runtimeTurnUserContent(message: String, turnNumber: Int, totalTurns: Int) -> String {
         let request = message.trimmingCharacters(in: .whitespacesAndNewlines)
         return [
@@ -59,20 +75,21 @@ final class ConversationEngine {
             throw TimeTavernError.missingActiveRoleCard
         }
         let promptMode = promptMode(for: roleCard, in: state)
+        let userName = resolvedUserName(state)
+        let roleName = roleCard.name
         let systemPrompt = [
             "【主要規則】",
-            effectiveMainRules(promptMode),
+            renderTemplate(effectiveMainRules(promptMode), user: userName, role: roleName),
             roleCardPromptContext(state: state, roleCard: roleCard),
             "【輸出規則】",
-            effectiveContextRules(promptMode),
+            renderTemplate(effectiveContextRules(promptMode), user: userName, role: roleName),
             "【處理要求】",
             "後續獨立 user message 會提供目前模型內容；最近對話會以獨立 user/assistant messages 提供。本輪 user message 可能會按順序包含：目前輸入者、這一輪 user 的內容、已啟用大模型的追加詞、統計時間、觸發世界書 Lorebooks、自訂補充。請根據主要規則、角色卡、目前模型內容、最近對話與輸出規則輸出正文。"
         ]
-            .map { replacePlaceholders($0, user: state.userProfile.userName, role: roleCard.name) }
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n\n")
 
-        let compressionContent = compressionReasonerMessage(mode: promptMode)
+        let compressionContent = compressionReasonerMessage(mode: promptMode, user: userName, role: roleName)
         return [
             ChatAPIMessage(role: "system", content: systemPrompt),
             compressionContent.isEmpty ? nil : ChatAPIMessage(role: "user", content: compressionContent)
@@ -88,13 +105,14 @@ final class ConversationEngine {
         let prompt = state.characterCardCreationAssistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? AssistantCard.defaultPrompt
             : state.characterCardCreationAssistantPrompt
+        let userName = resolvedUserName(state)
         let systemPrompt = [
             prompt,
             "你正在 Time Tavern iOS 使用\(assistantCard.displayName)。",
-            "使用者稱呼：\(state.userProfile.userName)",
+            "使用者稱呼：\(userName)",
             state.userProfile.extraPrompt
         ]
-            .map { replacePlaceholders($0, user: state.userProfile.userName, role: assistantCard.displayName) }
+            .map { renderTemplate($0, user: userName, role: assistantCard.displayName) }
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n\n")
         let latestUser = latestUserMessage(state: state, userInput: userInput)
@@ -106,6 +124,8 @@ final class ConversationEngine {
     }
 
     private func roleCardPromptContext(state: AppState, roleCard: RoleCard) -> String {
+        let userName = resolvedUserName(state)
+        let roleName = roleCard.name
         let title: String
         switch roleCard.mode {
         case .single:
@@ -121,26 +141,30 @@ final class ConversationEngine {
             .filter(\.enabled)
             .map { section in
                 [
-                    section.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "自定義內容" : "【\(section.name)】",
-                    section.content
+                    section.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? "自定義內容"
+                        : "【\(renderTemplate(section.name, user: userName, role: roleName))】",
+                    renderTemplate(section.content, user: userName, role: roleName)
                 ].joined(separator: "\n")
             }
             .joined(separator: "\n\n")
         return [
             title,
-            "使用者稱呼：\(state.userProfile.userName)",
+            "使用者稱呼：\(userName)",
             "角色模式：\(roleCard.mode.title)",
-            "角色卡名稱：\(roleCard.name)",
+            "角色卡名稱：\(renderTemplate(roleCard.name, user: userName, role: roleName))",
             sections
         ].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n")
     }
 
-    private func compressionReasonerMessage(mode: PromptModeConfig) -> String {
+    private func compressionReasonerMessage(mode: PromptModeConfig, user: String, role: String) -> String {
         let summaries = mode.compressionProfiles
             .filter(\.enabled)
             .filter { !$0.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .map { "【大模型內容：\($0.name)】\n\($0.summary)" }
+            .map {
+                "【大模型內容：\(renderTemplate($0.name, user: user, role: role))】\n\(renderTemplate($0.summary, user: user, role: role))"
+            }
             .joined(separator: "\n\n")
         guard !summaries.isEmpty else { return "" }
         return [
@@ -259,14 +283,16 @@ final class ConversationEngine {
             }
         }
         if let storedOpening = leadingAssistantMessages.first(where: { $0.source == "opening" }) ?? leadingAssistantMessages.first {
-            return storedOpening
+            var rendered = storedOpening
+            rendered.content = renderTemplate(storedOpening.content, user: resolvedUserName(state), role: roleCard.name)
+            return rendered
         }
         guard let opening = roleCard.activeOpeningDialogue?.content.trimmingCharacters(in: .whitespacesAndNewlines), !opening.isEmpty else {
             return nil
         }
         return ConversationMessage(
             role: .assistant,
-            content: replacePlaceholders(opening, user: state.userProfile.userName, role: roleCard.name),
+            content: renderTemplate(opening, user: resolvedUserName(state), role: roleCard.name),
             source: "opening"
         )
     }
@@ -288,11 +314,16 @@ final class ConversationEngine {
     ) -> String {
         let base = latestUser.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? userInput : latestUser.content
         let roleName = roleCard?.name ?? state.activeAssistantCard?.displayName ?? ""
+        let userName = resolvedUserName(state)
         let appendTerms = activeModelAppendTerms(mode: mode, state: state, roleName: roleName)
         let lorebooks = roleCard.map {
-            formatLorebooks(matchedLorebooks(roleCard: $0, conversation: state.conversation, userInput: base))
+            formatLorebooks(
+                matchedLorebooks(roleCard: $0, state: state, conversation: state.conversation, userInput: base),
+                user: userName,
+                role: roleName
+            )
         } ?? ""
-        let userSupplement = replacePlaceholders(state.userProfile.extraPrompt, user: state.userProfile.userName, role: roleName)
+        let userSupplement = renderTemplate(state.userProfile.extraPrompt, user: userName, role: roleName)
         return [
             base,
             appendTerms,
@@ -310,17 +341,19 @@ final class ConversationEngine {
             .filter { !$0.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || $0.compressedThroughTurnNumber > 0 }
             .flatMap(\.appendTerms)
             .filter(\.enabled)
-            .map { replacePlaceholders($0.content, user: state.userProfile.userName, role: roleName) }
+            .map { renderTemplate($0.content, user: resolvedUserName(state), role: roleName) }
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n\n")
     }
 
-    private func formatLorebooks(_ entries: [LorebookEntry]) -> String {
+    private func formatLorebooks(_ entries: [LorebookEntry], user: String, role: String) -> String {
         let content = entries
             .map { entry in
                 [
-                    entry.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "【世界書】" : "【世界書：\(entry.title)】",
-                    entry.content
+                    entry.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? "【世界書】"
+                        : "【世界書：\(renderTemplate(entry.title, user: user, role: role))】",
+                    renderTemplate(entry.content, user: user, role: role)
                 ].joined(separator: "\n")
             }
             .joined(separator: "\n\n")
@@ -514,6 +547,10 @@ final class ConversationEngine {
     }
 
     func compressionPromptPreview(mode: PromptModeConfig, profile: CompressionProfile) -> String {
+        compressionPromptPreview(mode: mode, profile: profile, user: "user", role: "")
+    }
+
+    private func compressionPromptPreview(mode: PromptModeConfig, profile: CompressionProfile, user: String, role: String) -> String {
         let context = profile.contextCompression.mainRules.isEmpty ? profile.mainRules : profile.contextCompression.mainRules
         let modelList = profile.contextCompression.models.isEmpty ? profile.models : profile.contextCompression.models
         let outputRules: String
@@ -540,19 +577,19 @@ final class ConversationEngine {
         let models = modelList
             .map { model in
                 """
-                [\(model.id)] \(model.name)
-                add: \(model.addRules)
-                delete: \(model.deleteRules)
+                [\(renderTemplate(model.id, user: user, role: role))] \(renderTemplate(model.name, user: user, role: role))
+                add: \(renderTemplate(model.addRules, user: user, role: role))
+                delete: \(renderTemplate(model.deleteRules, user: user, role: role))
                 """
             }
             .joined(separator: "\n\n")
         return [
-            "模式：\(mode.name)",
-            "壓縮 Profile：\(profile.name)",
+            "模式：\(renderTemplate(mode.name, user: user, role: role))",
+            "壓縮 Profile：\(renderTemplate(profile.name, user: user, role: role))",
             "類型：\(profile.modelKind.title)",
             "範圍：\(profile.contextScope.title)",
             outputRules,
-            context,
+            renderTemplate(context, user: user, role: role),
             models
         ]
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -687,7 +724,9 @@ final class ConversationEngine {
     }
 
     private func compressionAPIMessages(state: AppState, mode: PromptModeConfig, profile: CompressionProfile) -> [ChatAPIMessage] {
-        let instruction = compressionPromptPreview(mode: mode, profile: profile)
+        let roleName = state.activeRoleCard?.name ?? ""
+        let userName = resolvedUserName(state)
+        let instruction = compressionPromptPreview(mode: mode, profile: profile, user: userName, role: roleName)
         let context = state.conversation
             .filter { $0.turnNumber > profile.compressedThroughTurnNumber }
             .filter { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -695,7 +734,9 @@ final class ConversationEngine {
                 "# \(message.role.rawValue) turn \(message.turnNumber)\n\(message.content)"
             }
             .joined(separator: "\n\n----------------\n\n")
-        let currentSummary = profile.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "無" : profile.summary
+        let currentSummary = profile.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "無"
+            : renderTemplate(profile.summary, user: userName, role: roleName)
         let roleContext = compressionRoleContext(state: state, profile: profile)
         return [
             ChatAPIMessage(role: "user", content: instruction),
@@ -707,13 +748,17 @@ final class ConversationEngine {
 
     private func compressionRoleContext(state: AppState, profile: CompressionProfile) -> String {
         guard profile.contextScope == .roleAndText, let roleCard = state.activeRoleCard else { return "" }
+        let userName = resolvedUserName(state)
+        let roleName = roleCard.name
         let sections = roleCard.customSections
             .filter(\.enabled)
-            .map { "\($0.name):\n\($0.content)" }
+            .map {
+                "\(renderTemplate($0.name, user: userName, role: roleName)):\n\(renderTemplate($0.content, user: userName, role: roleName))"
+            }
             .joined(separator: "\n\n")
         return [
             "【角色卡資料】",
-            "角色：\(roleCard.name)",
+            "角色：\(renderTemplate(roleCard.name, user: userName, role: roleName))",
             sections
         ].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n\n")
@@ -890,15 +935,19 @@ final class ConversationEngine {
             PromptModeConfig()
     }
 
-    private func matchedLorebooks(roleCard: RoleCard, conversation: [ConversationMessage], userInput: String) -> [LorebookEntry] {
+    private func matchedLorebooks(roleCard: RoleCard, state: AppState, conversation: [ConversationMessage], userInput: String) -> [LorebookEntry] {
         let previousAssistant = conversation.last(where: { message in
             message.role == .assistant && !isModelInvisible(message)
         })?.content ?? ""
         let target = "\(previousAssistant)\n\(userInput)".lowercased()
+        let userName = resolvedUserName(state)
+        let roleName = roleCard.name
         return roleCard.lorebooks.filter { entry in
             guard entry.enabled else { return false }
             return entry.keywords.contains { keyword in
-                let normalized = keyword.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let normalized = renderTemplate(keyword, user: userName, role: roleName)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
                 return !normalized.isEmpty && target.contains(normalized)
             }
         }
@@ -932,10 +981,13 @@ final class ConversationEngine {
         mode.reasonerHistoryConfig.contextRules.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? mode.outputRules : mode.reasonerHistoryConfig.contextRules
     }
 
-    private func replacePlaceholders(_ text: String, user: String, role: String) -> String {
-        text
-            .replacingOccurrences(of: "{{user}}", with: user)
-            .replacingOccurrences(of: "{{chur}}", with: role)
+    private func renderTemplate(_ text: String, user: String, role: String) -> String {
+        Self.renderTemplate(text, user: user, role: role)
+    }
+
+    private func resolvedUserName(_ state: AppState) -> String {
+        let value = state.userProfile.userName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "你" : value
     }
 
     private func updateTimeTrackingFromText(state: inout AppState, text: String, allowBareTimeExpressions: Bool) -> Bool {

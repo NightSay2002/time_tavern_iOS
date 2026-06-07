@@ -87,8 +87,13 @@ final class TimeTavernStore: ObservableObject {
         state.activeAssistantMode = ""
         state.conversation = []
         if let opening = roleCard.activeOpeningDialogue?.content, !opening.isEmpty {
-            state.conversation.append(ConversationMessage(role: .assistant, content: opening, source: "opening"))
-            conversationEngine.updateTimeTrackingFromOpening(state: &state, opening: opening)
+            let renderedOpening = ConversationEngine.renderTemplate(
+                opening,
+                user: state.userProfile.userName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "你" : state.userProfile.userName,
+                role: roleCard.name
+            )
+            state.conversation.append(ConversationMessage(role: .assistant, content: renderedOpening, source: "opening"))
+            conversationEngine.updateTimeTrackingFromOpening(state: &state, opening: renderedOpening)
         }
         persist()
     }

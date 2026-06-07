@@ -242,6 +242,11 @@ struct ChatView: View {
     @State private var replayText = ""
     @State private var editingMessage: ConversationMessage?
     @State private var editText = ""
+    @FocusState private var composerFocused: Bool
+
+    static func shouldDismissComposerOnOutsideTap(isFocused: Bool) -> Bool {
+        isFocused
+    }
 
     var body: some View {
         NavigationStack {
@@ -256,10 +261,14 @@ struct ChatView: View {
                     )
                     .padding(.horizontal, 18)
                     .padding(.top, 12)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: dismissComposerInput)
 
                     CharacterStatusCard()
                         .padding(.horizontal, 18)
                         .padding(.top, 10)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: dismissComposerInput)
 
                     ZStack {
                         ScrollViewReader { proxy in
@@ -300,6 +309,7 @@ struct ChatView: View {
                                     withAnimation { proxy.scrollTo(last, anchor: .bottom) }
                                 }
                             }
+                            .scrollDismissesKeyboard(.interactively)
                         }
                         if store.state.conversation.isEmpty {
                             EmptyStoryHintCard()
@@ -308,8 +318,10 @@ struct ChatView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(TapGesture().onEnded { _ in dismissComposerInput() })
 
-                    VisualNovelComposer()
+                    VisualNovelComposer(inputFocused: $composerFocused)
                         .padding(.horizontal, 16)
                         .padding(.bottom, 40)
                 }
@@ -361,6 +373,11 @@ struct ChatView: View {
                 }
             }
         }
+    }
+
+    private func dismissComposerInput() {
+        guard Self.shouldDismissComposerOnOutsideTap(isFocused: composerFocused) else { return }
+        composerFocused = false
     }
 }
 
@@ -580,10 +597,14 @@ struct MessageBubble: View {
 
 struct VisualNovelComposer: View {
     @EnvironmentObject private var store: TimeTavernStore
-    @FocusState private var inputFocused: Bool
+    @FocusState.Binding var inputFocused: Bool
 
     static func isSendDisabled(isGenerating: Bool, text: String) -> Bool {
         !isGenerating && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func shouldDismissInputAfterPrimaryAction(isGenerating: Bool, text: String) -> Bool {
+        !isGenerating && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var sendDisabled: Bool {
@@ -600,7 +621,18 @@ struct VisualNovelComposer: View {
                 .tint(VNTheme.accentSoft)
                 .padding(.vertical, 8)
             Button {
-                store.isGenerating ? store.cancelGeneration() : store.sendCurrentMessage()
+                if store.isGenerating {
+                    store.cancelGeneration()
+                } else {
+                    let shouldDismissInput = Self.shouldDismissInputAfterPrimaryAction(
+                        isGenerating: store.isGenerating,
+                        text: store.composerText
+                    )
+                    store.sendCurrentMessage()
+                    if shouldDismissInput {
+                        inputFocused = false
+                    }
+                }
             } label: {
                 Image(systemName: store.isGenerating ? "stop.fill" : "paperplane.fill")
                     .font(.system(size: 17, weight: .bold))
@@ -2172,6 +2204,11 @@ struct ImageGenerationSettingsEditor: View {
 struct TriggerActionEditorView: View {
     @Binding var action: CompressionTriggerAction
     static let exposesFullImageGenerationSettings = true
+    static func parseTurnList(_ value: String) -> [Int] {
+        value
+            .split(separator: ",")
+            .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
 
     var body: some View {
         Form {
@@ -2251,9 +2288,7 @@ struct TriggerActionEditorView: View {
         Binding(
             get: { binding.wrappedValue.map(String.init).joined(separator: ", ") },
             set: {
-                binding.wrappedValue = $0
-                    .split(separator: ",")
-                    .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                binding.wrappedValue = Self.parseTurnList($0)
             }
         )
     }

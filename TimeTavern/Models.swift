@@ -258,6 +258,14 @@ struct UserProfile: Codable, Hashable {
     var userName: String = "user"
     var extraPrompt: String = ""
 
+    private enum CodingKeys: String, CodingKey {
+        case userName
+        case extraPrompt
+        case displayName
+        case name
+        case identityText
+    }
+
     init(userName: String = "user", extraPrompt: String = "") {
         self.userName = userName
         self.extraPrompt = extraPrompt
@@ -265,8 +273,19 @@ struct UserProfile: Codable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        userName = try container.decodeIfPresent(String.self, forKey: .userName) ?? "user"
-        extraPrompt = try container.decodeIfPresent(String.self, forKey: .extraPrompt) ?? ""
+        userName = try container.decodeIfPresent(String.self, forKey: .userName) ??
+            (try container.decodeIfPresent(String.self, forKey: .displayName)) ??
+            (try container.decodeIfPresent(String.self, forKey: .name)) ??
+            "user"
+        extraPrompt = try container.decodeIfPresent(String.self, forKey: .extraPrompt) ??
+            (try container.decodeIfPresent(String.self, forKey: .identityText)) ??
+            ""
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(userName, forKey: .userName)
+        try container.encode(extraPrompt, forKey: .extraPrompt)
     }
 }
 
