@@ -2109,86 +2109,11 @@ struct StudioView: View {
 
 struct PromptLabView: View {
     @EnvironmentObject private var store: TimeTavernStore
-    @State private var selectedQuickModeID = ""
-    @State private var selectedQuickProfileID = ""
     @State private var showModeImporter = false
-    static let exposesQuickProfileKindAndImageSettings = true
-    static let showsExpandedQuickImageSettings = true
-    static let hidesQuickCompressionSummaryEditor = true
+    static let showsCompressionQuickSection = false
 
     var body: some View {
         List {
-            Section(uiStatic("壓縮狀態快捷區")) {
-                if store.state.promptModes.isEmpty {
-                    Text(uiStatic("尚未建立 Prompt 模式。"))
-                        .foregroundStyle(VNTheme.textSecondary)
-                } else {
-                    Picker(uiStatic("模式"), selection: selectedModeBinding) {
-                        ForEach(store.state.promptModes) { mode in
-                            Text(mode.name).tag(mode.id)
-                        }
-                    }
-                    .disabled(Self.shouldLockQuickModePicker(state: store.state))
-                    if let caption = activeRoleQuickModeCaption {
-                        Text(caption)
-                            .font(.caption)
-                            .foregroundStyle(VNTheme.accentSoft)
-                    } else if store.state.activeRoleCard != nil {
-                        Text(ModelContentView.emptyStateText(state: store.state))
-                            .font(.caption)
-                            .foregroundStyle(VNTheme.textSecondary)
-                    }
-                    if let mode = selectedMode {
-                        Picker(uiStatic("大模型"), selection: selectedProfileBinding(modeID: mode.id)) {
-                            ForEach(mode.compressionProfiles) { profile in
-                                Text(profile.name).tag(profile.id)
-                            }
-                        }
-                        if let profile = selectedProfile(modeID: mode.id) {
-                            Text(profile.modelKind.title)
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(profile.modelKind == .image ? VNTheme.accentSoft : VNTheme.textSecondary)
-                            Picker(uiStatic("大模型類型"), selection: profileKindBinding(modeID: mode.id, profileID: profile.id)) {
-                                ForEach(CompressionProfileKind.allCases) { kind in
-                                    Text(kind.title).tag(kind)
-                                }
-                            }
-                            .pickerStyle(.segmented)
-                            Text(profile.modelKind.helpText)
-                                .font(.caption)
-                                .foregroundStyle(VNTheme.textSecondary)
-                            if profile.modelKind == .image {
-                                Text(uiStatic("建立圖片設定"))
-                                    .font(.headline)
-                                    .foregroundStyle(VNTheme.accentSoft)
-                                Text(uiStatic("大模型 call api 的輸出會作為 NovelAI Base Prompt；以下設定會送到 NAI。"))
-                                    .font(.caption)
-                                    .foregroundStyle(VNTheme.textSecondary)
-                                ImageGenerationSettingsEditor(settings: profileImageGenerationBinding(modeID: mode.id, profileID: profile.id))
-                            } else {
-                                Text(profile.storageModeDescription)
-                                    .font(.caption)
-                                    .foregroundStyle(VNTheme.textSecondary)
-                                if let binding = profileBinding(modeID: mode.id, profileID: profile.id) {
-                                    NavigationLink(uiStatic("編輯模塊 / 保存方式")) {
-                                        CompressionContextEditorView(profile: binding)
-                                    }
-                                }
-                            }
-                            Text(uiStatic("已壓縮到第 \(profile.compressedThroughTurnNumber) 回合"))
-                                .font(.caption)
-                                .foregroundStyle(VNTheme.textSecondary)
-                            NavigationLink(uiStatic("完整設定")) {
-                                if let binding = profileBinding(modeID: mode.id, profileID: profile.id) {
-                                    CompressionProfileEditorView(profile: binding)
-                                } else {
-                                    Text(uiStatic("此大模型已不存在。"))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
             Section(uiStatic("模式")) {
                 ForEach($store.state.promptModes) { $mode in
                     NavigationLink {
@@ -2205,9 +2130,9 @@ struct PromptLabView: View {
                                         .padding(.horizontal, 8)
                                         .padding(.vertical, 4)
                                         .background(Capsule().fill(VNTheme.accent.opacity(0.16)))
-                                }
+                                    }
                             }
-                            Text(uiStatic("\(mode.mode) · 自動上下文 · Profiles \(mode.compressionProfiles.count)"))
+                            Text(uiStatic("\(mode.mode) · 上限 \(mode.dialogueContextRounds) 回合 · Profiles \(mode.compressionProfiles.count)"))
                                 .font(.caption)
                                 .foregroundStyle(VNTheme.textSecondary)
                         }
@@ -2233,7 +2158,7 @@ struct PromptLabView: View {
                     Label(uiStatic("匯入模式 JSON"), systemImage: "square.and.arrow.down")
                 }
                 Button {
-                    if let mode = store.state.promptModes.first(where: { $0.id == effectiveModeID }) {
+                    if let mode = store.state.promptModes.first(where: { $0.id == currentExportModeID }) {
                         store.exportPromptModeJSON(mode)
                     }
                 } label: {
@@ -2256,12 +2181,6 @@ struct PromptLabView: View {
                 url.stopAccessingSecurityScopedResource()
             }
         }
-        .onAppear {
-            syncQuickModeWithActiveRoleCard()
-        }
-        .onChange(of: Self.activeRolePromptModeSignature(state: store.state)) { _, _ in
-            syncQuickModeWithActiveRoleCard()
-        }
         .onDisappear { store.persist() }
     }
 
@@ -2277,7 +2196,7 @@ struct PromptLabView: View {
         ModelContentView.visiblePromptModeIDs(state: state).first
     }
 
-    static func effectiveQuickModeID(state: AppState, selectedModeID: String) -> String {
+    static func exportTargetModeID(state: AppState, selectedModeID: String = "") -> String {
         if let activeModeID = activeRolePromptModeID(state: state) {
             return activeModeID
         }
@@ -2287,137 +2206,14 @@ struct PromptLabView: View {
         return state.promptModes.first?.id ?? ""
     }
 
-    static func shouldLockQuickModePicker(state: AppState) -> Bool {
-        activeRolePromptModeID(state: state) != nil
-    }
-
-    static func activeRolePromptModeSignature(state: AppState) -> String {
-        guard let roleCard = state.activeRoleCard else { return "inactive" }
-        let promptModeIDs = state.promptModes.map(\.id).joined(separator: ",")
-        let visibleIDs = ModelContentView.visiblePromptModeIDs(state: state).joined(separator: ",")
-        return [roleCard.id, roleCard.promptModeId, roleCard.mode.rawValue, visibleIDs, promptModeIDs].joined(separator: "|")
-    }
-
     private func deleteModes(at offsets: IndexSet) {
         let ids = Self.modeIDs(at: offsets, in: store.state.promptModes)
         store.state.promptModes.removeAll { ids.contains($0.id) && !Self.isBuiltIn($0.id) }
         store.persist()
     }
 
-    private var effectiveModeID: String {
-        Self.effectiveQuickModeID(state: store.state, selectedModeID: selectedQuickModeID)
-    }
-
-    private var selectedMode: PromptModeConfig? {
-        store.state.promptModes.first { $0.id == effectiveModeID }
-    }
-
-    private var selectedModeBinding: Binding<String> {
-        Binding(
-            get: { effectiveModeID },
-            set: {
-                guard !Self.shouldLockQuickModePicker(state: store.state) else { return }
-                selectedQuickModeID = $0
-                selectedQuickProfileID = ""
-            }
-        )
-    }
-
-    private var activeRoleQuickModeCaption: String? {
-        guard let roleCard = store.state.activeRoleCard,
-              let modeID = Self.activeRolePromptModeID(state: store.state),
-              let mode = store.state.promptModes.first(where: { $0.id == modeID })
-        else { return nil }
-        let roleName = roleCard.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? uiStatic("未命名角色卡") : roleCard.name
-        return "\(uiStatic("已跟隨目前角色卡"))：\(roleName) · \(mode.name)"
-    }
-
-    private func syncQuickModeWithActiveRoleCard() {
-        guard let activeModeID = Self.activeRolePromptModeID(state: store.state),
-              selectedQuickModeID != activeModeID
-        else { return }
-        selectedQuickModeID = activeModeID
-        selectedQuickProfileID = ""
-    }
-
-    private func selectedProfileBinding(modeID: String) -> Binding<String> {
-        Binding(
-            get: {
-                let profiles = profiles(for: modeID)
-                if profiles.contains(where: { $0.id == selectedQuickProfileID }) {
-                    return selectedQuickProfileID
-                }
-                return profiles.first?.id ?? ""
-            },
-            set: { selectedQuickProfileID = $0 }
-        )
-    }
-
-    private func selectedProfile(modeID: String) -> CompressionProfile? {
-        let profiles = profiles(for: modeID)
-        let id = profiles.contains(where: { $0.id == selectedQuickProfileID }) ? selectedQuickProfileID : profiles.first?.id ?? ""
-        return profiles.first { $0.id == id }
-    }
-
-    private func profiles(for modeID: String) -> [CompressionProfile] {
-        store.state.promptModes.first { $0.id == modeID }?.compressionProfiles ?? []
-    }
-
-    private func profileBinding(modeID: String, profileID: String) -> Binding<CompressionProfile>? {
-        guard let modeIndex = store.state.promptModes.firstIndex(where: { $0.id == modeID }),
-              store.state.promptModes[modeIndex].compressionProfiles.contains(where: { $0.id == profileID })
-        else { return nil }
-        return Binding(
-            get: {
-                guard let modeIndex = store.state.promptModes.firstIndex(where: { $0.id == modeID }),
-                      let profileIndex = store.state.promptModes[modeIndex].compressionProfiles.firstIndex(where: { $0.id == profileID })
-                else { return CompressionProfile(id: profileID, name: "已刪除大模型", enabled: false) }
-                return store.state.promptModes[modeIndex].compressionProfiles[profileIndex]
-            },
-            set: { next in
-                guard let modeIndex = store.state.promptModes.firstIndex(where: { $0.id == modeID }),
-                      let profileIndex = store.state.promptModes[modeIndex].compressionProfiles.firstIndex(where: { $0.id == profileID })
-                else { return }
-                store.state.promptModes[modeIndex].compressionProfiles[profileIndex] = next
-            }
-        )
-    }
-
-    private func profileKindBinding(modeID: String, profileID: String) -> Binding<CompressionProfileKind> {
-        Binding(
-            get: {
-                profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue.modelKind ?? .normal
-            },
-            set: { nextKind in
-                guard var profile = profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue else { return }
-                profile.applyModelKind(nextKind)
-                profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue = profile
-            }
-        )
-    }
-
-    private func profileImageGenerationBinding(modeID: String, profileID: String) -> Binding<NovelAIImageGenerationSettings> {
-        Binding(
-            get: {
-                guard var profile = profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue else {
-                    return .compressionTriggerDefault
-                }
-                profile.applyModelKind(.image)
-                guard let index = profile.primaryImageTriggerActionIndex,
-                      profile.triggerActions.indices.contains(index)
-                else { return .compressionTriggerDefault }
-                return profile.triggerActions[index].imageGeneration
-            },
-            set: { next in
-                guard var profile = profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue else { return }
-                profile.applyModelKind(.image)
-                guard let index = profile.primaryImageTriggerActionIndex,
-                      profile.triggerActions.indices.contains(index)
-                else { return }
-                profile.triggerActions[index].imageGeneration = next
-                profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue = profile
-            }
-        )
+    private var currentExportModeID: String {
+        Self.exportTargetModeID(state: store.state)
     }
 
 }
@@ -2427,7 +2223,8 @@ struct PromptModeEditorView: View {
     @Binding var mode: PromptModeConfig
     var isBuiltIn: Bool
 
-    static let exposesManualRoundEditing = false
+    static let exposesManualRoundEditing = true
+    static let exposesDialogueContextRoundLimit = true
 
     var body: some View {
         Form {
@@ -2436,7 +2233,15 @@ struct PromptModeEditorView: View {
                 TextField("Mode ID", text: $mode.mode)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Text(uiStatic("上下文輪數由模式設定與壓縮觸發自動使用。"))
+                Stepper(value: dialogueContextRoundsBinding, in: 1...100) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(uiStatic("上下文上限回合數"))
+                        Text(uiStatic("目前 \(mode.dialogueContextRounds) 回合"))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.accentSoft)
+                    }
+                }
+                Text(uiStatic("每個模式獨立設定。到達此上限才切換最近對話窗口；大模型觸發進度不會直接裁斷正文上下文。"))
                     .font(.caption)
                     .foregroundStyle(VNTheme.textSecondary)
                 if isBuiltIn {
@@ -2462,6 +2267,13 @@ struct PromptModeEditorView: View {
         .toolbar {
             Button(uiStatic("保存")) { store.persist() }
         }
+    }
+
+    private var dialogueContextRoundsBinding: Binding<Int> {
+        Binding(
+            get: { max(1, mode.dialogueContextRounds) },
+            set: { mode.dialogueContextRounds = min(100, max(1, $0)) }
+        )
     }
 }
 

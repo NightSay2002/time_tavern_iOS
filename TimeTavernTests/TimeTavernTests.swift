@@ -111,7 +111,7 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(ModelContentView.visiblePromptModeNames(state: state), ["開放世界"])
     }
 
-    func testPromptLabQuickModeFollowsActiveRoleCardMode() {
+    func testPromptLabExportTargetFollowsActiveRoleCardMode() {
         var state = AppState()
         state.promptModes = [
             PromptModeConfig(id: "single", name: "單角色", mode: "single"),
@@ -123,11 +123,10 @@ final class TimeTavernTests: XCTestCase {
         state.activeRoleCardId = card.id
 
         XCTAssertEqual(PromptLabView.activeRolePromptModeID(state: state), "open_world")
-        XCTAssertEqual(PromptLabView.effectiveQuickModeID(state: state, selectedModeID: "single"), "open_world")
-        XCTAssertTrue(PromptLabView.shouldLockQuickModePicker(state: state))
+        XCTAssertEqual(PromptLabView.exportTargetModeID(state: state, selectedModeID: "single"), "open_world")
     }
 
-    func testPromptLabQuickModeKeepsManualSelectionWithoutActiveRoleCard() {
+    func testPromptLabExportTargetKeepsManualSelectionWithoutActiveRoleCard() {
         var state = AppState()
         state.promptModes = [
             PromptModeConfig(id: "single", name: "單角色", mode: "single"),
@@ -135,8 +134,7 @@ final class TimeTavernTests: XCTestCase {
         ]
 
         XCTAssertNil(PromptLabView.activeRolePromptModeID(state: state))
-        XCTAssertEqual(PromptLabView.effectiveQuickModeID(state: state, selectedModeID: "multi"), "multi")
-        XCTAssertFalse(PromptLabView.shouldLockQuickModePicker(state: state))
+        XCTAssertEqual(PromptLabView.exportTargetModeID(state: state, selectedModeID: "multi"), "multi")
     }
 
     func testModelContentDoesNotShowAllModesWithoutActiveRoleCard() {
@@ -946,6 +944,103 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(engine.compressionAPIRequests(state: state(turn: 25, compressedThroughTurnNumber: 20), latestUserInput: "第 25 輪").count, 1)
     }
 
+    func testNonStandardProfileProgressDoesNotResetReasonerContext() throws {
+        var state = AppState()
+        var card = RoleCard()
+        card.promptModeId = "multi"
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+        state.conversation = [
+            ConversationMessage(role: .user, content: "第 1 輪使用者", turnNumber: 1),
+            ConversationMessage(role: .assistant, content: "第 1 輪回覆", turnNumber: 1),
+            ConversationMessage(role: .user, content: "第 2 輪使用者", turnNumber: 2),
+            ConversationMessage(role: .assistant, content: "第 2 輪回覆", turnNumber: 2),
+            ConversationMessage(role: .user, content: "第 3 輪使用者", turnNumber: 3),
+            ConversationMessage(role: .assistant, content: "第 3 輪回覆", turnNumber: 3),
+            ConversationMessage(role: .user, content: "第 4 輪使用者", turnNumber: 4),
+            ConversationMessage(role: .assistant, content: "第 4 輪回覆", turnNumber: 4),
+            ConversationMessage(role: .user, content: "第 5 輪使用者", turnNumber: 5),
+            ConversationMessage(role: .assistant, content: "第 5 輪回覆", turnNumber: 5)
+        ]
+        state.promptModes = [
+            PromptModeConfig(
+                id: "multi",
+                name: "多角色",
+                mode: "multi",
+                dialogueContextRounds: 20,
+                compressionProfiles: [
+                    CompressionProfile(
+                        id: "scheduled",
+                        name: "指定回合大模型",
+                        triggerActions: [
+                            CompressionTriggerAction(triggers: CompressionTriggerConfig(roundLimit: false, turns: [5]))
+                        ],
+                        summary: "指定大模型摘要",
+                        compressedThroughTurnNumber: 5
+                    )
+                ]
+            )
+        ]
+
+        let messages = try ConversationEngine().buildPromptMessages(state: state, userInput: "第 6 輪使用者")
+        let prompt = messages.map(\.content).joined(separator: "\n")
+
+        XCTAssertTrue(prompt.contains("指定大模型摘要"))
+        XCTAssertTrue(prompt.contains("第 1 輪使用者"))
+        XCTAssertTrue(prompt.contains("第 5 輪回覆"))
+    }
+
+    func testPromptModeDialogueContextRoundsControlReasonerContextReset() throws {
+        func prompt(dialogueContextRounds: Int) throws -> String {
+            var state = AppState()
+            var card = RoleCard()
+            card.promptModeId = "multi"
+            state.roleCards = [card]
+            state.activeRoleCardId = card.id
+            state.conversation = [
+                ConversationMessage(role: .user, content: "第 1 輪使用者", turnNumber: 1),
+                ConversationMessage(role: .assistant, content: "第 1 輪回覆", turnNumber: 1),
+                ConversationMessage(role: .user, content: "第 2 輪使用者", turnNumber: 2),
+                ConversationMessage(role: .assistant, content: "第 2 輪回覆", turnNumber: 2),
+                ConversationMessage(role: .user, content: "第 3 輪使用者", turnNumber: 3),
+                ConversationMessage(role: .assistant, content: "第 3 輪回覆", turnNumber: 3),
+                ConversationMessage(role: .user, content: "第 4 輪使用者", turnNumber: 4),
+                ConversationMessage(role: .assistant, content: "第 4 輪回覆", turnNumber: 4),
+                ConversationMessage(role: .user, content: "第 5 輪使用者", turnNumber: 5),
+                ConversationMessage(role: .assistant, content: "第 5 輪回覆", turnNumber: 5)
+            ]
+            state.promptModes = [
+                PromptModeConfig(
+                    id: "multi",
+                    name: "多角色",
+                    mode: "multi",
+                    dialogueContextRounds: dialogueContextRounds,
+                    compressionProfiles: [
+                        CompressionProfile(
+                            id: "scheduled",
+                            name: "指定回合大模型",
+                            summary: "第 5 回合模型摘要",
+                            compressedThroughTurnNumber: 5
+                        )
+                    ]
+                )
+            ]
+            return try ConversationEngine()
+                .buildPromptMessages(state: state, userInput: "第 6 輪使用者")
+                .map(\.content)
+                .joined(separator: "\n")
+        }
+
+        let twentyRoundModePrompt = try prompt(dialogueContextRounds: 20)
+        let fiveRoundModePrompt = try prompt(dialogueContextRounds: 5)
+
+        XCTAssertTrue(twentyRoundModePrompt.contains("第 1 輪使用者"))
+        XCTAssertTrue(twentyRoundModePrompt.contains("第 5 輪回覆"))
+        XCTAssertFalse(fiveRoundModePrompt.contains("第 1 輪使用者"))
+        XCTAssertTrue(fiveRoundModePrompt.contains("第 5 輪回覆"))
+        XCTAssertTrue(fiveRoundModePrompt.contains("第 5 回合模型摘要"))
+    }
+
     func testCompressionImageRequestsUseBasePromptAndDoNotSaveNormalSummary() throws {
         var state = AppState()
         var card = RoleCard()
@@ -1555,7 +1650,8 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(croppedImage.size.height, 40, accuracy: 1)
         XCTAssertFalse(cropped.isEmpty)
         XCTAssertFalse(PromptRulesEditorView.exposesLegacyFields)
-        XCTAssertFalse(PromptModeEditorView.exposesManualRoundEditing)
+        XCTAssertTrue(PromptModeEditorView.exposesManualRoundEditing)
+        XCTAssertTrue(PromptModeEditorView.exposesDialogueContextRoundLimit)
     }
 
     func testCompressionProfileKindSwitchesImageAndStorageModes() {
@@ -1597,9 +1693,7 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(PromptLabView.modeIDs(at: IndexSet([1, 99]), in: modes), ["custom"])
         XCTAssertEqual(CompressionProfileListView.profileIDs(at: IndexSet([1, 99]), in: profiles), ["image"])
         XCTAssertEqual(SettingsView.roleCardImportSymbolName, "person.crop.square")
-        XCTAssertTrue(PromptLabView.exposesQuickProfileKindAndImageSettings)
-        XCTAssertTrue(PromptLabView.showsExpandedQuickImageSettings)
-        XCTAssertTrue(PromptLabView.hidesQuickCompressionSummaryEditor)
+        XCTAssertFalse(PromptLabView.showsCompressionQuickSection)
         XCTAssertEqual(
             TriggerActionListView.validActionOffsets(IndexSet([0, 99]), in: [CompressionTriggerAction(id: "a")]),
             IndexSet([0])

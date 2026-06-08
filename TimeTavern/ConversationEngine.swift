@@ -183,8 +183,8 @@ final class ConversationEngine {
         userInput: String
     ) -> [ChatAPIMessage] {
         let latestUser = latestUserMessage(state: state, userInput: userInput)
-        let compressedThroughTurnNumber = maxCompressedThroughTurnNumber(mode: mode)
         let contextLimit = max(1, mode.dialogueContextRounds)
+        let compressedThroughTurnNumber = reasonerContextCutoffTurnNumber(mode: mode, latestUser: latestUser)
         let allRounds = completedDialogueRoundsBeforeLatestUser(state: state, latestUser: latestUser)
         let recentRounds = allRounds
             .filter { roundTurnNumber($0) > compressedThroughTurnNumber }
@@ -265,11 +265,11 @@ final class ConversationEngine {
         round.first { $0.role == .user }?.turnNumber ?? 0
     }
 
-    private func maxCompressedThroughTurnNumber(mode: PromptModeConfig) -> Int {
-        mode.compressionProfiles
-            .filter(\.enabled)
-            .map(\.compressedThroughTurnNumber)
-            .max() ?? 0
+    private func reasonerContextCutoffTurnNumber(mode: PromptModeConfig, latestUser: ConversationMessage) -> Int {
+        let contextLimit = max(1, mode.dialogueContextRounds)
+        let latestTurn = max(0, latestUser.turnNumber)
+        guard latestTurn > contextLimit else { return 0 }
+        return ((latestTurn - 1) / contextLimit) * contextLimit
     }
 
     private func openingDialogueContextMessage(state: AppState, roleCard: RoleCard) -> ConversationMessage? {
