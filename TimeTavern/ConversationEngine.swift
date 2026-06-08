@@ -378,7 +378,7 @@ final class ConversationEngine {
             nextMode.compressionProfiles = mode.compressionProfiles.map { profile in
                 guard profile.enabled else { return profile }
                 var nextProfile = profile
-                let shouldTrigger = profile.triggerActions.contains { action in
+                let triggeredActions = effectiveCompressionTriggerActions(profile: profile).filter { action in
                     shouldTriggerCompression(
                         action: action,
                         profile: profile,
@@ -389,18 +389,11 @@ final class ConversationEngine {
                         phase: phase
                     )
                 }
-                guard shouldTrigger else { return nextProfile }
-                if profile.modelKind == .image {
-                    nextProfile.summary = ""
-                    nextProfile.compressedThroughTurnNumber = turn
-                    nextProfile.updatedAt = Date()
-                    return nextProfile
-                }
-                if profile.triggerActions.contains(where: { $0.action == .copyUserInput }) {
+                guard !triggeredActions.isEmpty else { return nextProfile }
+                if triggeredActions.contains(where: { $0.action == .copyUserInput }) {
                     nextProfile.summary = latestUserInput
                 } else {
-                    let addition = "第 \(turn) 回合摘要：\(latestUserInput.prefix(500))"
-                    nextProfile.summary = updatedCompressionSummary(profile: profile, addition: String(addition))
+                    return nextProfile
                 }
                 nextProfile.compressedThroughTurnNumber = turn
                 nextProfile.updatedAt = Date()
@@ -423,7 +416,7 @@ final class ConversationEngine {
         }
         return mode.compressionProfiles.enumerated().compactMap { profileIndex, profile in
             guard profile.enabled, profile.modelKind == .normal else { return nil }
-            let triggeredActions = profile.triggerActions.filter { action in
+            let triggeredActions = effectiveCompressionTriggerActions(profile: profile).filter { action in
                 action.enabled && action.action == .callAPI && shouldTriggerCompression(
                     action: action,
                     profile: profile,
@@ -467,7 +460,7 @@ final class ConversationEngine {
             guard profile.enabled, profile.modelKind == .image else { return [] }
             var imageProfile = profile
             imageProfile.summary = ""
-            return profile.triggerActions.filter { action in
+            return effectiveCompressionTriggerActions(profile: profile).filter { action in
                 action.enabled &&
                     action.action == .callAPI &&
                     action.keywordFollowupAction.isImageGeneration &&
@@ -596,6 +589,24 @@ final class ConversationEngine {
             .joined(separator: "\n\n---\n\n")
     }
 
+    func effectiveCompressionTriggerActions(profile: CompressionProfile) -> [CompressionTriggerAction] {
+        let sourceActions = profile.triggerActions
+        if sourceActions.isEmpty {
+            var fallback = CompressionTriggerAction(
+                id: "default",
+                name: profile.id == "standard" ? "標準壓縮" : "觸發組合 1",
+                triggers: fallbackTriggerConfig(for: profile)
+            )
+            fallback.action = .callAPI
+            return [fallback]
+        }
+        return sourceActions.map { action in
+            var next = action
+            next.triggers = resolvedTriggerConfig(action: action, profile: profile)
+            return next
+        }
+    }
+
     static func modelProcessingCompletionMessage(for requests: [CompressionAPIRequest]) -> String {
         let names = requests
             .map { $0.triggerActionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? $0.profileName : $0.triggerActionName }
@@ -614,16 +625,17 @@ final class ConversationEngine {
         phase: CompressionProcessingPhase
     ) -> Bool {
         guard action.enabled else { return false }
+        let triggers = resolvedTriggerConfig(action: action, profile: profile)
         let alreadyCompressedCurrentTurn = profile.compressedThroughTurnNumber >= turn && turn > 0
-        if action.triggers.everyTurn && !alreadyCompressedCurrentTurn { return true }
+        if triggers.everyTurn && !alreadyCompressedCurrentTurn { return true }
         if let targetTurn = action.turn, targetTurn == turn, profile.compressedThroughTurnNumber < targetTurn { return true }
-        if scheduledTurnMatches(action.triggers.turns, turn: turn, compressedThroughTurnNumber: profile.compressedThroughTurnNumber, interval: mode.dialogueContextRounds) {
+        if scheduledTurnMatches(triggers.turns, turn: turn, compressedThroughTurnNumber: profile.compressedThroughTurnNumber, interval: mode.dialogueContextRounds) {
             return true
         }
-        if keywordTriggerMatches(action: action, latestUserInput: latestUserInput, latestAssistantText: latestAssistantText, phase: phase) {
+        if keywordTriggerMatches(action: action, triggers: triggers, latestUserInput: latestUserInput, latestAssistantText: latestAssistantText, phase: phase) {
             return true
         }
-        if action.triggers.roundLimit || profile.triggers.roundLimit {
+        if triggers.roundLimit {
             return turn - profile.compressedThroughTurnNumber >= max(1, mode.dialogueContextRounds)
         }
         return false
@@ -640,6 +652,7 @@ final class ConversationEngine {
             (action.keywordFollowupAction == .stopAfterModel || action.skipReasoner) &&
             keywordTriggerMatches(
                 action: action,
+                triggers: action.triggers,
                 latestUserInput: latestUserInput,
                 latestAssistantText: latestAssistantText,
                 phase: phase
@@ -648,20 +661,21 @@ final class ConversationEngine {
 
     private func keywordTriggerMatches(
         action: CompressionTriggerAction,
+        triggers: CompressionTriggerConfig,
         latestUserInput: String,
         latestAssistantText: String,
         phase: CompressionProcessingPhase
     ) -> Bool {
-        let source = normalizedKeywordSource(action.triggers.keywordSource.isEmpty ? action.source : action.triggers.keywordSource)
+        let source = normalizedKeywordSource(triggers.keywordSource.isEmpty ? action.source : triggers.keywordSource)
         let userCanMatch = source != "assistant"
         let assistantCanMatch = source != "user"
         let userMatched = userCanMatch && (
             (!action.keywords.isEmpty && keywordExpression(action.keywords, matches: latestUserInput)) ||
-                (!action.triggers.keywords.isEmpty && keywordList(action.triggers.keywords, matches: latestUserInput))
+                (!triggers.keywords.isEmpty && keywordList(triggers.keywords, matches: latestUserInput))
         )
         let assistantMatched = assistantCanMatch && (
             (!action.keywords.isEmpty && keywordExpression(action.keywords, matches: latestAssistantText)) ||
-                (!action.triggers.keywords.isEmpty && keywordList(action.triggers.keywords, matches: latestAssistantText))
+                (!triggers.keywords.isEmpty && keywordList(triggers.keywords, matches: latestAssistantText))
         )
         switch phase {
         case .beforeReasoner:
@@ -669,6 +683,34 @@ final class ConversationEngine {
         case .afterAssistant:
             return assistantMatched
         }
+    }
+
+    private func fallbackTriggerConfig(for profile: CompressionProfile) -> CompressionTriggerConfig {
+        if profile.id == "standard" || profile.triggers.hasNonRoundLimitTrigger {
+            return profile.triggers
+        }
+        return CompressionTriggerConfig(roundLimit: false)
+    }
+
+    private func resolvedTriggerConfig(action: CompressionTriggerAction, profile: CompressionProfile) -> CompressionTriggerConfig {
+        let actionTriggers = action.triggers
+        let profileTriggers = profile.triggers
+        if actionTriggers.isDefaultRoundLimitOnly && profileTriggers.hasNonRoundLimitTrigger {
+            return profileTriggers
+        }
+        var resolved = actionTriggers
+        resolved.everyTurn = resolved.everyTurn || profileTriggers.everyTurn
+        resolved.turns = Array(Set(resolved.turns + profileTriggers.turns)).sorted()
+        if resolved.keywords.isEmpty {
+            resolved.keywords = profileTriggers.keywords
+        }
+        if resolved.keywordSource == "both", profileTriggers.keywordSource != "both" {
+            resolved.keywordSource = profileTriggers.keywordSource
+        }
+        if profile.id == "standard", profileTriggers.roundLimit {
+            resolved.roundLimit = true
+        }
+        return resolved
     }
 
     private func scheduledTurnMatches(
@@ -1326,4 +1368,21 @@ final class ConversationEngine {
 
 private extension NSRange {
     var upperBound: Int { location + length }
+}
+
+private extension CompressionTriggerConfig {
+    var hasNonRoundLimitTrigger: Bool {
+        everyTurn ||
+            !keywords.isEmpty ||
+            !turns.isEmpty ||
+            keywordSource != "both"
+    }
+
+    var isDefaultRoundLimitOnly: Bool {
+        !everyTurn &&
+            roundLimit &&
+            keywords.isEmpty &&
+            keywordSource == "both" &&
+            turns.isEmpty
+    }
 }

@@ -7,6 +7,148 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(AppTab.allCases.count, 5)
         XCTAssertEqual(AppTab.allCases.map(\.title), ["對話", "角色", "存檔", "工房", "設定"])
         XCTAssertEqual(AppTab.allCases.map { $0.title(in: .simplified) }, ["对话", "角色", "存档", "工房", "设定"])
+        XCTAssertTrue(RootView.usesCustomTabContentHost)
+        XCTAssertTrue(RootView.tabBarHiddenByDefault)
+        XCTAssertTrue(RootView.repeatedTabTapResetsCurrentTab)
+        XCTAssertFalse(RootView.shouldResetTabAfterTap(wasSelected: false))
+        XCTAssertTrue(RootView.shouldResetTabAfterTap(wasSelected: true))
+        XCTAssertTrue(TabContentHost.keepsInactiveTabsMounted)
+        XCTAssertTrue(TabContentHost.resetsOnlyRepeatedlyTappedTab)
+        XCTAssertTrue(TabContentHost.isInteractive(.characters, selectedTab: .characters))
+        XCTAssertFalse(TabContentHost.isInteractive(.characters, selectedTab: .chat))
+        XCTAssertEqual(TabContentHost.opacity(for: .characters, selectedTab: .characters), 1)
+        XCTAssertEqual(TabContentHost.opacity(for: .characters, selectedTab: .chat), 0)
+        XCTAssertGreaterThan(TabContentHost.zIndex(for: .characters, selectedTab: .characters), TabContentHost.zIndex(for: .characters, selectedTab: .chat))
+        XCTAssertTrue(VisualNovelTabBar.reportsRepeatedTabSelection)
+        XCTAssertFalse(VisualNovelTabBar.wasAlreadySelected(.characters, selectedTab: .chat))
+        XCTAssertTrue(VisualNovelTabBar.wasAlreadySelected(.characters, selectedTab: .characters))
+        XCTAssertTrue(VisualNovelTabBar.clipsBackgroundToRoundedShape)
+        XCTAssertTrue(VisualNovelTabBar.reservesContentAboveBottomBar)
+        XCTAssertGreaterThanOrEqual(VisualNovelTabBar.contentAvoidanceHeight, 96)
+        XCTAssertLessThan(ChatView.composerBottomPadding, 24)
+        XCTAssertFalse(RootView.shouldDisplayTabBar(selectedTab: .chat, tabBarVisible: false))
+        XCTAssertTrue(RootView.shouldDisplayTabBar(selectedTab: .chat, tabBarVisible: true))
+        XCTAssertTrue(RootView.shouldDisplayTabBar(selectedTab: .settings, tabBarVisible: false))
+        XCTAssertFalse(RootView.tabBarVisibleAfterSelecting(.chat))
+        XCTAssertTrue(RootView.tabBarVisibleAfterSelecting(.characters))
+        XCTAssertTrue(RootView.shouldRevealTabBar(startY: 760, containerHeight: 800, translation: CGSize(width: 0, height: -44)))
+        XCTAssertFalse(RootView.shouldRevealTabBar(startY: 620, containerHeight: 800, translation: CGSize(width: 0, height: -44)))
+        XCTAssertFalse(RootView.shouldRevealTabBar(startY: 760, containerHeight: 800, translation: CGSize(width: 80, height: -20)))
+        XCTAssertTrue(RootView.shouldRevealTabBar(from: .chat, startY: 760, containerHeight: 800, translation: CGSize(width: 0, height: -44)))
+        XCTAssertFalse(RootView.shouldRevealTabBar(from: .settings, startY: 760, containerHeight: 800, translation: CGSize(width: 0, height: -44)))
+        XCTAssertTrue(RootView.shouldHideTabBar(isVisible: true, translation: CGSize(width: 0, height: 40)))
+        XCTAssertTrue(RootView.shouldHideTabBar(from: .chat, isVisible: true, translation: CGSize(width: 0, height: 40)))
+        XCTAssertFalse(RootView.shouldHideTabBar(from: .settings, isVisible: true, translation: CGSize(width: 0, height: 40)))
+
+        var resetIDs = TabResetIDs()
+        let chatID = resetIDs[.chat]
+        let characterID = resetIDs[.characters]
+        resetIDs.reset(.characters)
+        XCTAssertEqual(resetIDs[.chat], chatID)
+        XCTAssertNotEqual(resetIDs[.characters], characterID)
+    }
+
+    @MainActor
+    func testGlobalKeyboardDismissInstallerIgnoresOnlyEditableInputs() {
+        XCTAssertTrue(GlobalKeyboardDismissInstaller.dismissesKeyboardOnNonInputTap)
+        XCTAssertTrue(GlobalKeyboardDismissInstaller.preservesEditableInputTouches)
+
+        let textField = UITextField()
+        XCTAssertTrue(KeyboardDismissTapDelegate.isEditableTextInputView(textField))
+
+        let editableTextView = UITextView()
+        editableTextView.isEditable = true
+        XCTAssertTrue(KeyboardDismissTapDelegate.isEditableTextInputView(editableTextView))
+
+        let selectableTextView = UITextView()
+        selectableTextView.isEditable = false
+        XCTAssertFalse(KeyboardDismissTapDelegate.isEditableTextInputView(selectableTextView))
+
+        let child = UIView()
+        editableTextView.addSubview(child)
+        XCTAssertTrue(KeyboardDismissTapDelegate.isEditableTextInputView(child))
+    }
+
+    func testHeaderTopActionsDisableDuringGeneration() {
+        XCTAssertTrue(ChatSceneHeader.isTopActionDisabled(isGenerating: true))
+        XCTAssertFalse(ChatSceneHeader.isTopActionDisabled(isGenerating: false))
+        XCTAssertTrue(ChatSceneHeader.hidesStaticAppTitle)
+        XCTAssertEqual(ChatSceneHeader.sessionTitle(activeRoleCard: RoleCard(name: "千夜"), activeAssistantCard: nil), "千夜")
+        XCTAssertEqual(ChatSceneHeader.modelSubtitle(model: "deepseek-reasoner"), "DeepSeek deepseek-reasoner")
+        XCTAssertTrue(ChatView.requiresRegenerateConfirmation)
+        XCTAssertTrue(ModelContentView.hasCloseToolbarAction)
+        XCTAssertTrue(LogView.hasCloseToolbarAction)
+    }
+
+    func testModelContentShowsOnlyActiveRoleCardPromptMode() {
+        var state = AppState()
+        state.promptModes = [
+            PromptModeConfig(id: "single", name: "單角色", mode: "single"),
+            PromptModeConfig(id: "multi", name: "多角色", mode: "multi"),
+            PromptModeConfig(id: "no_role", name: "開放世界", mode: "no_role")
+        ]
+        var card = RoleCard(id: "role_multi", name: "群像卡", mode: .multi)
+        card.promptModeId = "multi"
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+
+        XCTAssertEqual(ModelContentView.visiblePromptModeIDs(state: state), ["multi"])
+        XCTAssertEqual(ModelContentView.visiblePromptModeNames(state: state), ["多角色"])
+    }
+
+    func testModelContentFallsBackToRoleCardModeWhenPromptModeIDIsStale() {
+        var state = AppState()
+        state.promptModes = [
+            PromptModeConfig(id: "multi", name: "多角色", mode: "multi"),
+            PromptModeConfig(id: "open_world", name: "開放世界", mode: "no_role")
+        ]
+        var card = RoleCard(id: "role_world", name: "世界卡", mode: .noRole)
+        card.promptModeId = "deleted_mode"
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+
+        XCTAssertEqual(ModelContentView.visiblePromptModeIDs(state: state), ["open_world"])
+        XCTAssertEqual(ModelContentView.visiblePromptModeNames(state: state), ["開放世界"])
+    }
+
+    func testPromptLabQuickModeFollowsActiveRoleCardMode() {
+        var state = AppState()
+        state.promptModes = [
+            PromptModeConfig(id: "single", name: "單角色", mode: "single"),
+            PromptModeConfig(id: "open_world", name: "開放世界", mode: "no_role")
+        ]
+        var card = RoleCard(id: "role_world", name: "世界卡", mode: .noRole)
+        card.promptModeId = "deleted_mode"
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+
+        XCTAssertEqual(PromptLabView.activeRolePromptModeID(state: state), "open_world")
+        XCTAssertEqual(PromptLabView.effectiveQuickModeID(state: state, selectedModeID: "single"), "open_world")
+        XCTAssertTrue(PromptLabView.shouldLockQuickModePicker(state: state))
+    }
+
+    func testPromptLabQuickModeKeepsManualSelectionWithoutActiveRoleCard() {
+        var state = AppState()
+        state.promptModes = [
+            PromptModeConfig(id: "single", name: "單角色", mode: "single"),
+            PromptModeConfig(id: "multi", name: "多角色", mode: "multi")
+        ]
+
+        XCTAssertNil(PromptLabView.activeRolePromptModeID(state: state))
+        XCTAssertEqual(PromptLabView.effectiveQuickModeID(state: state, selectedModeID: "multi"), "multi")
+        XCTAssertFalse(PromptLabView.shouldLockQuickModePicker(state: state))
+    }
+
+    func testModelContentDoesNotShowAllModesWithoutActiveRoleCard() {
+        var state = AppState()
+        state.promptModes = [
+            PromptModeConfig(id: "multi", name: "多角色", mode: "multi"),
+            PromptModeConfig(id: "no_role", name: "開放世界", mode: "no_role")
+        ]
+
+        XCTAssertEqual(ModelContentView.visiblePromptModeIDs(state: state), [])
+        XCTAssertEqual(ModelContentView.visiblePromptModeNames(state: state), [])
+        XCTAssertEqual(ModelContentView.emptyStateText(state: state), "尚未啟用角色卡。")
     }
 
     func testVisualNovelComposerSendDisabledState() {
@@ -16,11 +158,34 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertTrue(VisualNovelComposer.shouldDismissInputAfterPrimaryAction(isGenerating: false, text: "開始故事"))
         XCTAssertFalse(VisualNovelComposer.shouldDismissInputAfterPrimaryAction(isGenerating: false, text: "   \n"))
         XCTAssertFalse(VisualNovelComposer.shouldDismissInputAfterPrimaryAction(isGenerating: true, text: "停止生成"))
+        XCTAssertTrue(VisualNovelComposer.showsPlusInsertMenu)
+        XCTAssertEqual(VisualNovelComposer.quickInsertItems.map(\.text), ["｛繼續｝", "（）", "｛推进剧情到下一个场景｝", "｛时间流逝——｝"])
+        XCTAssertTrue(VisualNovelComposer.slashCommandItems.map(\.text).contains("/reload "))
+        XCTAssertEqual(VisualNovelComposer.composerTextByInserting(current: "", insertion: "｛繼續｝"), "｛繼續｝")
+        XCTAssertEqual(VisualNovelComposer.composerTextByInserting(current: "前文", insertion: "（）"), "前文\n（）")
     }
 
     func testChatOutsideTapDismissesComposerOnlyWhenFocused() {
         XCTAssertTrue(ChatView.shouldDismissComposerOnOutsideTap(isFocused: true))
         XCTAssertFalse(ChatView.shouldDismissComposerOnOutsideTap(isFocused: false))
+    }
+
+    @MainActor
+    func testSlashCommandsAreHandledBeforeChatSend() {
+        let statusParts = TimeTavernStore.slashCommandParts("/run_time 5 推進劇情")
+        let parsedRuntime = TimeTavernStore.parseRunTimeArguments("5 推進劇情")
+        let store = TimeTavernStore()
+        store.composerText = "/ai_status"
+
+        store.sendCurrentMessage()
+
+        XCTAssertEqual(statusParts?.keyword, "run_time")
+        XCTAssertEqual(statusParts?.argumentText, "5 推進劇情")
+        XCTAssertEqual(parsedRuntime.turns, 5)
+        XCTAssertEqual(parsedRuntime.message, "推進劇情")
+        XCTAssertTrue(store.statusText.contains("角色"))
+        XCTAssertEqual(store.state.conversation, [])
+        XCTAssertTrue(TimeTavernStore.slashCommandHelpText.contains("/reload"))
     }
 
     func testTriggerTurnListParsesWebStyleWhitespaceAndPunctuation() {
@@ -105,16 +270,52 @@ final class TimeTavernTests: XCTestCase {
         ]
 
         store.updateMessage(id: "m1", content: "new")
-        store.setMessageFeedback(id: "m1", feedback: "positive")
+        store.setMessageFeedback(id: "m1", feedback: "like")
 
         XCTAssertEqual(store.state.conversation.first?.content, "new")
-        XCTAssertEqual(store.state.conversation.first?.feedback, "positive")
+        XCTAssertEqual(store.state.conversation.first?.feedback, "like")
+        XCTAssertEqual(TimeTavernStore.normalizedMessageFeedback("positive"), "like")
+        XCTAssertEqual(TimeTavernStore.normalizedMessageFeedback("negative"), "dislike")
+        XCTAssertEqual(TimeTavernStore.normalizedMessageFeedback("👍"), "like")
+        XCTAssertTrue(MessageRow.usesInlineActionButtons)
+        XCTAssertTrue(MessageRow.removesLongPressContextMenu)
+        XCTAssertTrue(MessageBubble.usesPartialTextSelectableView)
+        XCTAssertTrue(MessageBubble.generatedImagesOpenPreviewOnTap)
+        XCTAssertTrue(GeneratedImagePreview.showsCloseButton)
+        XCTAssertTrue(SelectableMessageText.supportsPartialTextSelection)
+        XCTAssertFalse(SelectableMessageText.isEditable)
+        XCTAssertTrue(MessageActionBar.usesEmojiFeedbackIcons)
+        XCTAssertEqual(MessageActionBar.feedbackEmoji(for: "like"), "👍")
+        XCTAssertEqual(MessageActionBar.feedbackEmoji(for: "dislike"), "👎")
+        XCTAssertEqual(MessageActionBar.normalizedFeedback("positive"), "like")
 
         store.setMessageFeedback(id: "m1", feedback: "unknown")
         XCTAssertEqual(store.state.conversation.first?.feedback, "")
 
         let legacy = try? JSONDecoder().decode(ConversationMessage.self, from: Data(#"{"id":"legacy","role":"assistant","content":"old"}"#.utf8))
         XCTAssertEqual(legacy?.feedback, "")
+    }
+
+    @MainActor
+    func testGenerationActionsAreGuardedAgainstReentry() {
+        let store = TimeTavernStore()
+        store.isGenerating = true
+        let user = ConversationMessage(id: "u1", role: .user, content: "上一句", turnNumber: 1)
+        let assistant = ConversationMessage(id: "a1", role: .assistant, content: "生成中", turnNumber: 1)
+        store.state.conversation = [user, assistant]
+
+        store.regenerateLatestAssistant()
+        XCTAssertEqual(store.state.conversation, [user, assistant])
+        XCTAssertTrue(store.statusText.contains("生成中"))
+
+        store.replay(from: user, with: "改寫")
+        XCTAssertEqual(store.state.conversation, [user, assistant])
+
+        store.runTime(turns: 3, seedMessage: "推進")
+        XCTAssertEqual(store.state.conversation, [user, assistant])
+
+        store.send("新輸入")
+        XCTAssertEqual(store.state.conversation, [user, assistant])
     }
 
     @MainActor
@@ -512,6 +713,42 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(modes.first?.compressionProfiles.first?.summary, "這是一個秘密")
     }
 
+    func testCompressionUsesProfileLevelTriggersWhenActionsAreMissing() {
+        var state = AppState()
+        var card = RoleCard()
+        card.promptModeId = "multi"
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+        state.conversation = [
+            ConversationMessage(role: .user, content: "第五輪", turnNumber: 5),
+            ConversationMessage(role: .assistant, content: "", turnNumber: 5)
+        ]
+        state.promptModes = [
+            PromptModeConfig(
+                id: "multi",
+                name: "多角色",
+                mode: "multi",
+                dialogueContextRounds: 20,
+                compressionProfiles: [
+                    CompressionProfile(
+                        id: "legacy_profile",
+                        name: "舊版大模型",
+                        triggers: CompressionTriggerConfig(roundLimit: false, turns: [5]),
+                        triggerActions: [],
+                        compressedThroughTurnNumber: 0
+                    )
+                ]
+            )
+        ]
+
+        let engine = ConversationEngine()
+        let requests = engine.compressionAPIRequests(state: state, latestUserInput: "第五輪")
+
+        XCTAssertEqual(engine.effectiveCompressionTriggerActions(profile: state.promptModes[0].compressionProfiles[0]).count, 1)
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.profileID, "legacy_profile")
+    }
+
     func testNormalCompressionStoresPlainTextOrJSONByModulePresence() throws {
         var state = AppState()
         var card = RoleCard()
@@ -543,7 +780,19 @@ final class TimeTavernTests: XCTestCase {
             )
         ]
 
-        let modes = ConversationEngine().applyCompressionIfNeeded(state: state, latestUserInput: "新的事件")
+        let engine = ConversationEngine()
+        let requests = engine.compressionAPIRequests(state: state, latestUserInput: "新的事件")
+        var completionState = state
+        for request in requests {
+            completionState.promptModes = engine.applyCompressionCompletion(
+                state: completionState,
+                request: request,
+                completion: request.profileID == "json"
+                    ? #"{"model":{"PlotProgression":["新的事件"]},"delete":{"PlotProgression":[]}}"#
+                    : "第 2 回合摘要：新的事件"
+            )
+        }
+        let modes = completionState.promptModes
         let profiles = modes.first?.compressionProfiles ?? []
         let plain = try XCTUnwrap(profiles.first { $0.id == "plain" })
         let json = try XCTUnwrap(profiles.first { $0.id == "json" })
@@ -556,6 +805,43 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertFalse(plain.summary.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{"))
         XCTAssertTrue(plot.first?.contains("新的事件") == true)
         XCTAssertNotNil(delete["PlotProgression"] as? [String])
+    }
+
+    func testCallAPICompressionDoesNotMarkCompressedBeforeCompletion() throws {
+        var state = AppState()
+        var card = RoleCard()
+        card.promptModeId = "multi"
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+        state.conversation = [
+            ConversationMessage(role: .user, content: "第一輪", turnNumber: 1),
+            ConversationMessage(role: .assistant, content: "", turnNumber: 1)
+        ]
+        state.promptModes = [
+            PromptModeConfig(
+                id: "multi",
+                name: "多角色",
+                mode: "multi",
+                compressionProfiles: [
+                    CompressionProfile(
+                        id: "api",
+                        name: "API 大模型",
+                        triggerActions: [CompressionTriggerAction(triggers: CompressionTriggerConfig(everyTurn: true, roundLimit: false))],
+                        compressedThroughTurnNumber: 0
+                    )
+                ]
+            )
+        ]
+
+        let engine = ConversationEngine()
+        let premarked = engine.applyCompressionIfNeeded(state: state, latestUserInput: "第一輪")
+        let request = try XCTUnwrap(engine.compressionAPIRequests(state: state, latestUserInput: "第一輪").first)
+        let completed = engine.applyCompressionCompletion(state: state, request: request, completion: "完成摘要")
+
+        XCTAssertEqual(premarked.first?.compressionProfiles.first?.compressedThroughTurnNumber, 0)
+        XCTAssertEqual(premarked.first?.compressionProfiles.first?.summary, "")
+        XCTAssertEqual(completed.first?.compressionProfiles.first?.compressedThroughTurnNumber, 1)
+        XCTAssertEqual(completed.first?.compressionProfiles.first?.summary, "完成摘要")
     }
 
     func testCompressionAPIRequestsBuildMessagesAndMergeJSONCompletion() throws {
@@ -616,6 +902,50 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(profile.compressedThroughTurnNumber, 2)
     }
 
+    func testScheduledCompressionAPIRequestsRunAtConfiguredTurnsAndRepeatByContextWindow() {
+        let scheduledTurns = TriggerActionEditorView.parseTurnList("5 10 15 20")
+        let engine = ConversationEngine()
+
+        func state(turn: Int, compressedThroughTurnNumber: Int) -> AppState {
+            var state = AppState()
+            var card = RoleCard()
+            card.promptModeId = "multi"
+            state.roleCards = [card]
+            state.activeRoleCardId = card.id
+            state.conversation = [
+                ConversationMessage(role: .user, content: "第 \(turn) 輪", turnNumber: turn),
+                ConversationMessage(role: .assistant, content: "", turnNumber: turn)
+            ]
+            state.promptModes = [
+                PromptModeConfig(
+                    id: "multi",
+                    name: "多角色",
+                    mode: "multi",
+                    dialogueContextRounds: 20,
+                    compressionProfiles: [
+                        CompressionProfile(
+                            id: "scheduled",
+                            name: "指定回合大模型",
+                            triggerActions: [
+                                CompressionTriggerAction(
+                                    name: "5 10 15 20",
+                                    triggers: CompressionTriggerConfig(roundLimit: false, turns: scheduledTurns)
+                                )
+                            ],
+                            compressedThroughTurnNumber: compressedThroughTurnNumber
+                        )
+                    ]
+                )
+            ]
+            return state
+        }
+
+        XCTAssertEqual(engine.compressionAPIRequests(state: state(turn: 5, compressedThroughTurnNumber: 0), latestUserInput: "第 5 輪").count, 1)
+        XCTAssertEqual(engine.compressionAPIRequests(state: state(turn: 6, compressedThroughTurnNumber: 5), latestUserInput: "第 6 輪").count, 0)
+        XCTAssertEqual(engine.compressionAPIRequests(state: state(turn: 10, compressedThroughTurnNumber: 5), latestUserInput: "第 10 輪").count, 1)
+        XCTAssertEqual(engine.compressionAPIRequests(state: state(turn: 25, compressedThroughTurnNumber: 20), latestUserInput: "第 25 輪").count, 1)
+    }
+
     func testCompressionImageRequestsUseBasePromptAndDoNotSaveNormalSummary() throws {
         var state = AppState()
         var card = RoleCard()
@@ -674,8 +1004,8 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertTrue(requestText.contains("【上下文】"))
         XCTAssertEqual(requests.first?.imageSettings.model, "nai-diffusion-4-5-curated")
         XCTAssertEqual(requests.first?.imageSettings.negativePrompt, "bad hands")
-        XCTAssertEqual(locallyUpdated.summary, "")
-        XCTAssertEqual(locallyUpdated.compressedThroughTurnNumber, 2)
+        XCTAssertEqual(locallyUpdated.summary, "舊圖片狀態")
+        XCTAssertEqual(locallyUpdated.compressedThroughTurnNumber, 0)
         XCTAssertEqual(started.summary, "")
         XCTAssertEqual(started.compressedThroughTurnNumber, 2)
     }
@@ -1269,6 +1599,7 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(SettingsView.roleCardImportSymbolName, "person.crop.square")
         XCTAssertTrue(PromptLabView.exposesQuickProfileKindAndImageSettings)
         XCTAssertTrue(PromptLabView.showsExpandedQuickImageSettings)
+        XCTAssertTrue(PromptLabView.hidesQuickCompressionSummaryEditor)
         XCTAssertEqual(
             TriggerActionListView.validActionOffsets(IndexSet([0, 99]), in: [CompressionTriggerAction(id: "a")]),
             IndexSet([0])
@@ -1338,6 +1669,7 @@ final class TimeTavernTests: XCTestCase {
 
         XCTAssertEqual(store.state.novelAIAlbum.map(\.id), ["keep"])
         XCTAssertEqual(NovelAIHistoryPanel.itemsAfterDeleting(id: "keep", from: store.state.novelAIAlbum), [])
+        XCTAssertTrue(NovelAIHistoryPanel.generatedImagesOpenPreviewOnTap)
     }
 
     func testNovelAIDeleteHelpersMatchWebVisibleDeleteButtons() {

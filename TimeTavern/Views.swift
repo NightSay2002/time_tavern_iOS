@@ -1,9 +1,10 @@
 import PhotosUI
 import SwiftData
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
-enum AppTab: String, CaseIterable, Identifiable {
+enum AppTab: String, CaseIterable, Identifiable, Hashable {
     case chat
     case characters
     case archive
@@ -50,40 +51,65 @@ struct RootView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var store: TimeTavernStore
     @State private var selectedTab: AppTab = .chat
+    @State private var tabBarVisible = false
+    @State private var tabResetIDs = TabResetIDs()
+    static let usesCustomTabContentHost = true
+    static let tabBarHiddenByDefault = true
+    static let repeatedTabTapResetsCurrentTab = true
+    private var shouldShowTabBar: Bool {
+        Self.shouldDisplayTabBar(selectedTab: selectedTab, tabBarVisible: tabBarVisible)
+    }
 
     var body: some View {
-        ZStack {
-            VisualNovelBackground()
-            TabView(selection: $selectedTab) {
-                ChatView()
-                    .tag(AppTab.chat)
-                CharactersView()
-                    .tag(AppTab.characters)
-                ArchiveView()
-                    .tag(AppTab.archive)
-                StudioView()
-                    .tag(AppTab.studio)
-                SettingsView()
-                    .tag(AppTab.settings)
-            }
-            .toolbar(.hidden, for: .tabBar)
-            .tint(VNTheme.accent)
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VisualNovelTabBar(selectedTab: $selectedTab)
-                .padding(.horizontal, 14)
-                .padding(.top, 8)
-                .padding(.bottom, 8)
-                .background(
-                    LinearGradient(
-                        colors: [.clear, VNTheme.ink.opacity(0.86)],
-                        startPoint: .top,
-                        endPoint: .bottom
+        GeometryReader { proxy in
+            ZStack(alignment: .bottom) {
+                VisualNovelBackground()
+                TabContentHost(selectedTab: selectedTab, resetIDs: tabResetIDs)
+                    .padding(.bottom, shouldShowTabBar ? VisualNovelTabBar.contentAvoidanceHeight : 0)
+                    .animation(.spring(response: 0.34, dampingFraction: 0.88), value: shouldShowTabBar)
+                if shouldShowTabBar {
+                    VisualNovelTabBar(
+                        selectedTab: $selectedTab,
+                        onSelect: { tab, wasSelected in
+                            if Self.shouldResetTabAfterTap(wasSelected: wasSelected) {
+                                tabResetIDs.reset(tab)
+                            }
+                            withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+                                tabBarVisible = Self.tabBarVisibleAfterSelecting(tab)
+                            }
+                        }
                     )
-                    .ignoresSafeArea()
-                )
+                    .padding(.horizontal, 14)
+                    .padding(.top, 8)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 24).onEnded { value in
+                    if Self.shouldRevealTabBar(
+                        from: selectedTab,
+                        startY: value.startLocation.y,
+                        containerHeight: proxy.size.height,
+                        translation: value.translation
+                    ) {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+                            tabBarVisible = true
+                        }
+                    } else if Self.shouldHideTabBar(
+                        from: selectedTab,
+                        isVisible: tabBarVisible,
+                        translation: value.translation
+                    ) {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+                            tabBarVisible = false
+                        }
+                    }
+                }
+            )
         }
         .preferredColorScheme(.dark)
+        .background(GlobalKeyboardDismissInstaller().frame(width: 0, height: 0))
         .task {
             store.attach(modelContext: modelContext)
             UIChineseTextConverter.activeLanguage = store.state.uiLanguage
@@ -91,6 +117,266 @@ struct RootView: View {
         .onChange(of: store.state.uiLanguage) { _, language in
             UIChineseTextConverter.activeLanguage = language
         }
+    }
+
+    static func shouldDisplayTabBar(selectedTab: AppTab, tabBarVisible: Bool) -> Bool {
+        selectedTab != .chat || tabBarVisible
+    }
+
+    static func tabBarVisibleAfterSelecting(_ tab: AppTab) -> Bool {
+        tab != .chat
+    }
+
+    static func shouldResetTabAfterTap(wasSelected: Bool) -> Bool {
+        wasSelected
+    }
+
+    static func shouldRevealTabBar(from selectedTab: AppTab, startY: CGFloat, containerHeight: CGFloat, translation: CGSize) -> Bool {
+        selectedTab == .chat && shouldRevealTabBar(startY: startY, containerHeight: containerHeight, translation: translation)
+    }
+
+    static func shouldHideTabBar(from selectedTab: AppTab, isVisible: Bool, translation: CGSize) -> Bool {
+        selectedTab == .chat && shouldHideTabBar(isVisible: isVisible, translation: translation)
+    }
+
+    static func shouldRevealTabBar(startY: CGFloat, containerHeight: CGFloat, translation: CGSize) -> Bool {
+        let startsNearBottom = startY >= containerHeight - 96
+        let swipesUp = translation.height <= -28
+        let mostlyVertical = abs(translation.height) > abs(translation.width) * 0.8
+        return startsNearBottom && swipesUp && mostlyVertical
+    }
+
+    static func shouldHideTabBar(isVisible: Bool, translation: CGSize) -> Bool {
+        isVisible && translation.height >= 32 && abs(translation.height) > abs(translation.width) * 0.8
+    }
+}
+
+struct GlobalKeyboardDismissInstaller: UIViewRepresentable {
+    static let dismissesKeyboardOnNonInputTap = true
+    static let preservesEditableInputTouches = true
+
+    func makeCoordinator() -> KeyboardDismissTapDelegate {
+        KeyboardDismissTapDelegate()
+    }
+
+    func makeUIView(context: Context) -> KeyboardDismissInstallingView {
+        KeyboardDismissInstallingView(tapDelegate: context.coordinator)
+    }
+
+    func updateUIView(_ uiView: KeyboardDismissInstallingView, context: Context) {
+        uiView.tapDelegate = context.coordinator
+        uiView.installIfNeeded()
+    }
+}
+
+final class KeyboardDismissInstallingView: UIView {
+    var tapDelegate: KeyboardDismissTapDelegate
+    private weak var installedWindow: UIWindow?
+    private var tapGesture: UITapGestureRecognizer?
+
+    init(tapDelegate: KeyboardDismissTapDelegate) {
+        self.tapDelegate = tapDelegate
+        super.init(frame: .zero)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        installIfNeeded()
+    }
+
+    func installIfNeeded() {
+        guard let window else { return }
+        guard installedWindow !== window else { return }
+        if let installedWindow, let tapGesture {
+            installedWindow.removeGestureRecognizer(tapGesture)
+        }
+        let gesture = UITapGestureRecognizer(target: tapDelegate, action: #selector(KeyboardDismissTapDelegate.handleTap(_:)))
+        gesture.cancelsTouchesInView = false
+        gesture.delegate = tapDelegate
+        window.addGestureRecognizer(gesture)
+        installedWindow = window
+        tapGesture = gesture
+    }
+
+    deinit {
+        if let installedWindow, let tapGesture {
+            installedWindow.removeGestureRecognizer(tapGesture)
+        }
+    }
+}
+
+final class KeyboardDismissTapDelegate: NSObject, UIGestureRecognizerDelegate {
+    @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        !Self.isEditableTextInputView(touch.view)
+    }
+
+    static func isEditableTextInputView(_ view: UIView?) -> Bool {
+        var current = view
+        while let candidate = current {
+            if candidate is UITextField {
+                return true
+            }
+            if let textView = candidate as? UITextView, textView.isEditable {
+                return true
+            }
+            current = candidate.superview
+        }
+        return false
+    }
+}
+
+struct ImagePreviewItem: Identifiable {
+    let id = UUID()
+    var title: String
+    var imageData: Data
+}
+
+struct GeneratedImagePreview: View {
+    @Environment(\.dismiss) private var dismiss
+    let item: ImagePreviewItem
+    static let showsCloseButton = true
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.ignoresSafeArea()
+            if let image = UIImage(data: item.imageData) {
+                GeometryReader { proxy in
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .accessibilityLabel(item.title.isEmpty ? uiStatic("放大圖片") : item.title)
+                }
+            } else {
+                Text(uiStatic("圖片無法顯示"))
+                    .font(.headline)
+                    .foregroundStyle(.white)
+            }
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .bold))
+                    .frame(width: 38, height: 38)
+                    .foregroundStyle(.white)
+                    .background(.black.opacity(0.58), in: Circle())
+                    .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 18)
+            .padding(.trailing, 18)
+            .accessibilityLabel(uiStatic("關閉"))
+        }
+    }
+}
+
+struct GeneratedImageZoomBadge: View {
+    var body: some View {
+        Image(systemName: "magnifyingglass")
+            .font(.system(size: 12, weight: .bold))
+            .frame(width: 28, height: 28)
+            .foregroundStyle(.white)
+            .background(.black.opacity(0.54), in: Circle())
+            .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+    }
+}
+
+struct TabResetIDs: Equatable {
+    private var chat = UUID()
+    private var characters = UUID()
+    private var archive = UUID()
+    private var studio = UUID()
+    private var settings = UUID()
+
+    subscript(tab: AppTab) -> UUID {
+        switch tab {
+        case .chat:
+            chat
+        case .characters:
+            characters
+        case .archive:
+            archive
+        case .studio:
+            studio
+        case .settings:
+            settings
+        }
+    }
+
+    mutating func reset(_ tab: AppTab) {
+        let next = UUID()
+        switch tab {
+        case .chat:
+            chat = next
+        case .characters:
+            characters = next
+        case .archive:
+            archive = next
+        case .studio:
+            studio = next
+        case .settings:
+            settings = next
+        }
+    }
+}
+
+struct TabContentHost: View {
+    let selectedTab: AppTab
+    let resetIDs: TabResetIDs
+    static let keepsInactiveTabsMounted = true
+    static let resetsOnlyRepeatedlyTappedTab = true
+
+    var body: some View {
+        ZStack {
+            tabLayer(.chat) {
+                ChatView()
+            }
+            tabLayer(.characters) {
+                CharactersView()
+            }
+            tabLayer(.archive) {
+                ArchiveView()
+            }
+            tabLayer(.studio) {
+                StudioView()
+            }
+            tabLayer(.settings) {
+                SettingsView()
+            }
+        }
+        .tint(VNTheme.accent)
+    }
+
+    private func tabLayer<Content: View>(_ tab: AppTab, @ViewBuilder content: () -> Content) -> some View {
+        content()
+            .id(resetIDs[tab])
+            .opacity(Self.opacity(for: tab, selectedTab: selectedTab))
+            .allowsHitTesting(Self.isInteractive(tab, selectedTab: selectedTab))
+            .accessibilityHidden(!Self.isInteractive(tab, selectedTab: selectedTab))
+            .zIndex(Self.zIndex(for: tab, selectedTab: selectedTab))
+    }
+
+    static func isInteractive(_ tab: AppTab, selectedTab: AppTab) -> Bool {
+        tab == selectedTab
+    }
+
+    static func opacity(for tab: AppTab, selectedTab: AppTab) -> Double {
+        isInteractive(tab, selectedTab: selectedTab) ? 1 : 0
+    }
+
+    static func zIndex(for tab: AppTab, selectedTab: AppTab) -> Double {
+        isInteractive(tab, selectedTab: selectedTab) ? 1 : 0
     }
 }
 
@@ -160,11 +446,8 @@ struct VNGlassCard<Content: View>: View {
     var body: some View {
         content
             .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(VNTheme.panel.opacity(0.66))
-                    .overlay(.ultraThinMaterial.opacity(0.34))
-            )
+            .background(VNGlassRoundedBackground(cornerRadius: cornerRadius, fill: VNTheme.panel.opacity(0.66), materialOpacity: 0.34))
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .stroke(
@@ -184,17 +467,57 @@ struct VNGlassCard<Content: View>: View {
     }
 }
 
-struct VisualNovelTabBar: View {
-    @Binding var selectedTab: AppTab
-    @EnvironmentObject private var store: TimeTavernStore
+struct VNGlassRoundedBackground: View {
+    var cornerRadius: CGFloat
+    var fill: Color
+    var materialOpacity: Double
 
     var body: some View {
-        HStack(spacing: 4) {
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(fill)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .opacity(materialOpacity)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+}
+
+struct VNGlassCapsuleBackground: View {
+    var fill: Color
+    var materialOpacity: Double
+
+    var body: some View {
+        ZStack {
+            Capsule()
+                .fill(fill)
+            Capsule()
+                .fill(.ultraThinMaterial)
+                .opacity(materialOpacity)
+        }
+        .clipShape(Capsule())
+    }
+}
+
+struct VisualNovelTabBar: View {
+    @Binding var selectedTab: AppTab
+    var onSelect: (AppTab, Bool) -> Void = { _, _ in }
+    @EnvironmentObject private var store: TimeTavernStore
+    static let clipsBackgroundToRoundedShape = true
+    static let reservesContentAboveBottomBar = true
+    static let contentAvoidanceHeight: CGFloat = 104
+    static let reportsRepeatedTabSelection = true
+
+    var body: some View {
+        HStack(spacing: 6) {
             ForEach(AppTab.allCases) { tab in
                 Button {
+                    let wasSelected = Self.wasAlreadySelected(tab, selectedTab: selectedTab)
                     withAnimation(.spring(response: 0.36, dampingFraction: 0.82)) {
                         selectedTab = tab
                     }
+                    onSelect(tab, wasSelected)
                 } label: {
                     VStack(spacing: 4) {
                         Image(systemName: tab.systemImage)
@@ -205,31 +528,35 @@ struct VisualNovelTabBar: View {
                             .minimumScaleFactor(0.8)
                     }
                     .frame(maxWidth: .infinity)
-                    .frame(height: 54)
+                    .frame(height: 58)
                     .foregroundStyle(selectedTab == tab ? VNTheme.accentSoft : VNTheme.textSecondary.opacity(0.78))
                     .background {
                         if selectedTab == tab {
-                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            RoundedRectangle(cornerRadius: 20, style: .continuous)
                                 .fill(VNTheme.accent.opacity(0.18))
                                 .shadow(color: VNTheme.accent.opacity(0.58), radius: 16, y: 0)
                                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
                         }
                     }
+                    .contentShape(Rectangle())
                 }
+                .frame(maxWidth: .infinity)
                 .buttonStyle(.plain)
                 .accessibilityLabel(tab.title)
+                .accessibilityIdentifier("tab-\(tab.rawValue)")
             }
         }
         .padding(6)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(VNTheme.ink.opacity(0.78))
-                .overlay(.ultraThinMaterial.opacity(0.2))
-        )
+        .background(VNGlassRoundedBackground(cornerRadius: 28, fill: VNTheme.ink.opacity(0.78), materialOpacity: 0.20))
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
         )
+    }
+
+    static func wasAlreadySelected(_ tab: AppTab, selectedTab: AppTab) -> Bool {
+        tab == selectedTab
     }
 }
 
@@ -242,11 +569,15 @@ struct ChatView: View {
     @State private var replayText = ""
     @State private var editingMessage: ConversationMessage?
     @State private var editText = ""
+    @State private var showRegenerateConfirmation = false
+    @State private var previewImage: ImagePreviewItem?
     @FocusState private var composerFocused: Bool
 
     static func shouldDismissComposerOnOutsideTap(isFocused: Bool) -> Bool {
         isFocused
     }
+    static let composerBottomPadding: CGFloat = 16
+    static let requiresRegenerateConfirmation = true
 
     var body: some View {
         NavigationStack {
@@ -254,50 +585,50 @@ struct ChatView: View {
                 VisualNovelBackground()
                 VStack(spacing: 0) {
                     ChatSceneHeader(
-                        showModelContent: { showModelContent = true },
-                        showRunTime: { showRunTime = true },
-                        regenerate: { store.regenerateLatestAssistant() },
-                        showLogs: { showLogs = true }
+                        isGenerating: store.isGenerating,
+                        showModelContent: {
+                            dismissComposerInput()
+                            showModelContent = true
+                        },
+                        showRunTime: {
+                            dismissComposerInput()
+                            showRunTime = true
+                        },
+                        regenerate: {
+                            dismissComposerInput()
+                            showRegenerateConfirmation = true
+                        },
+                        showLogs: {
+                            dismissComposerInput()
+                            showLogs = true
+                        }
                     )
                     .padding(.horizontal, 18)
                     .padding(.top, 12)
-                    .contentShape(Rectangle())
-                    .onTapGesture(perform: dismissComposerInput)
-
-                    CharacterStatusCard()
-                        .padding(.horizontal, 18)
-                        .padding(.top, 10)
-                        .contentShape(Rectangle())
-                        .onTapGesture(perform: dismissComposerInput)
 
                     ZStack {
                         ScrollViewReader { proxy in
                             ScrollView {
                                 LazyVStack(spacing: 12) {
                                     ForEach(store.state.conversation) { message in
-                                        MessageBubble(message: message)
-                                            .id(message.id)
-                                            .contextMenu {
-                                                Button(uiStatic("編輯內容")) {
-                                                    editingMessage = message
-                                                    editText = message.content
-                                                }
-                                                Button(uiStatic("從此分支重跑")) {
-                                                    replayMessage = message
-                                                    replayText = message.content
-                                                }
-                                                if message.role == .assistant {
-                                                    Button(uiStatic("標記喜歡")) {
-                                                        store.setMessageFeedback(id: message.id, feedback: "positive")
-                                                    }
-                                                    Button(uiStatic("標記不喜歡")) {
-                                                        store.setMessageFeedback(id: message.id, feedback: "negative")
-                                                    }
-                                                    Button(uiStatic("清除評價")) {
-                                                        store.setMessageFeedback(id: message.id, feedback: "")
-                                                    }
-                                                }
+                                        MessageRow(
+                                            message: message,
+                                            edit: {
+                                                editingMessage = message
+                                                editText = message.content
+                                            },
+                                            replay: {
+                                                replayMessage = message
+                                                replayText = message.content
+                                            },
+                                            setFeedback: { feedback in
+                                                store.setMessageFeedback(id: message.id, feedback: feedback)
+                                            },
+                                            previewImage: { imageData in
+                                                previewImage = ImagePreviewItem(title: uiStatic("生成圖片"), imageData: imageData)
                                             }
+                                        )
+                                            .id(message.id)
                                     }
                                 }
                                 .padding(.horizontal, 16)
@@ -323,13 +654,28 @@ struct ChatView: View {
 
                     VisualNovelComposer(inputFocused: $composerFocused)
                         .padding(.horizontal, 16)
-                        .padding(.bottom, 40)
+                        .padding(.bottom, Self.composerBottomPadding)
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $showLogs) { LogView() }
             .sheet(isPresented: $showModelContent) { ModelContentView() }
             .sheet(isPresented: $showRunTime) { RunTimeView() }
+            .confirmationDialog(
+                uiStatic("重新生成最新回覆？"),
+                isPresented: $showRegenerateConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button(uiStatic("重新生成"), role: .destructive) {
+                    store.regenerateLatestAssistant()
+                }
+                Button(uiStatic("取消"), role: .cancel) {}
+            } message: {
+                Text(uiStatic("會刪除最新 AI 回覆並重新生成，不會立刻執行。"))
+            }
+            .fullScreenCover(item: $previewImage) { item in
+                GeneratedImagePreview(item: item)
+            }
             .sheet(item: $replayMessage) { message in
                 NavigationStack {
                     Form {
@@ -382,38 +728,57 @@ struct ChatView: View {
 }
 
 struct ChatSceneHeader: View {
+    @EnvironmentObject private var store: TimeTavernStore
+    var isGenerating: Bool
     var showModelContent: () -> Void
     var showRunTime: () -> Void
     var regenerate: () -> Void
     var showLogs: () -> Void
+    static let hidesStaticAppTitle = true
+
+    static func isTopActionDisabled(isGenerating: Bool) -> Bool {
+        isGenerating
+    }
+
+    static func sessionTitle(activeRoleCard: RoleCard?, activeAssistantCard: AssistantCard?) -> String {
+        activeRoleCard?.name.nonEmpty ?? activeAssistantCard?.displayName ?? uiStatic("尚未開始角色卡")
+    }
+
+    static func modelSubtitle(model: String) -> String {
+        "DeepSeek \(model)"
+    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .center, spacing: 12) {
+            CharacterAvatarView(
+                imageData: store.state.activeRoleCard?.coverImageData,
+                fallbackSystemImage: store.state.activeAssistantCard == nil ? "moon.stars.fill" : "wand.and.stars",
+                size: 50,
+                cornerRadius: 15
+            )
             VStack(alignment: .leading, spacing: 4) {
-                Text("Time Tavern")
-                    .font(.system(size: 34, weight: .black, design: .serif))
+                Text(Self.sessionTitle(activeRoleCard: store.state.activeRoleCard, activeAssistantCard: store.state.activeAssistantCard))
+                    .font(.title2.weight(.black))
                     .foregroundStyle(.white)
                     .shadow(color: VNTheme.accent.opacity(0.55), radius: 12, y: 3)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.78)
-                Text("AI Roleplay Session")
+                    .minimumScaleFactor(0.72)
+                Text(Self.modelSubtitle(model: store.state.apiSettings.deepSeekModel))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(VNTheme.textSecondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.78)
             }
             Spacer(minLength: 8)
             HStack(spacing: 4) {
-                HeaderIconButton(systemImage: "doc.text.magnifyingglass", action: showModelContent, label: uiStatic("模型內容"))
-                HeaderIconButton(systemImage: "forward.frame.fill", action: showRunTime, label: uiStatic("自動推演"))
-                HeaderIconButton(systemImage: "arrow.clockwise", action: regenerate, label: uiStatic("重新生成"))
-                HeaderIconButton(systemImage: "waveform.path.ecg", action: showLogs, label: "AI Logs")
+                HeaderIconButton(systemImage: "doc.text.magnifyingglass", action: showModelContent, label: uiStatic("模型內容"), disabled: Self.isTopActionDisabled(isGenerating: isGenerating))
+                HeaderIconButton(systemImage: "forward.frame.fill", action: showRunTime, label: uiStatic("自動推演"), disabled: Self.isTopActionDisabled(isGenerating: isGenerating))
+                HeaderIconButton(systemImage: "arrow.clockwise", action: regenerate, label: uiStatic("重新生成"), disabled: Self.isTopActionDisabled(isGenerating: isGenerating))
+                HeaderIconButton(systemImage: "waveform.path.ecg", action: showLogs, label: "AI Logs", disabled: Self.isTopActionDisabled(isGenerating: isGenerating))
             }
             .padding(5)
-            .background(
-                Capsule()
-                    .fill(VNTheme.ink.opacity(0.66))
-                    .overlay(.ultraThinMaterial.opacity(0.22))
-            )
+            .background(VNGlassCapsuleBackground(fill: VNTheme.ink.opacity(0.66), materialOpacity: 0.22))
+            .clipShape(Capsule())
             .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 1))
             .shadow(color: VNTheme.ink.opacity(0.4), radius: 18, y: 10)
         }
@@ -424,17 +789,43 @@ struct HeaderIconButton: View {
     var systemImage: String
     var action: () -> Void
     var label: String
+    var disabled = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 14, weight: .semibold))
                 .frame(width: 31, height: 31)
-                .foregroundStyle(VNTheme.accentSoft)
+                .foregroundStyle(disabled ? VNTheme.textSecondary.opacity(0.45) : VNTheme.accentSoft)
         }
         .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.55 : 1)
         .accessibilityLabel(label)
     }
+}
+
+#Preview("Chat Header") {
+    let store = TimeTavernStore()
+    var card = RoleCard(name: "千夜")
+    card.promptModeId = "multi"
+    store.state.roleCards = [card]
+    store.state.activeRoleCardId = card.id
+    store.state.apiSettings.deepSeekModel = "deepseek-reasoner"
+
+    return ZStack {
+        VisualNovelBackground()
+        ChatSceneHeader(
+            isGenerating: false,
+            showModelContent: {},
+            showRunTime: {},
+            regenerate: {},
+            showLogs: {}
+        )
+        .padding(18)
+    }
+    .environmentObject(store)
+    .preferredColorScheme(.dark)
 }
 
 struct CharacterStatusCard: View {
@@ -493,10 +884,12 @@ struct CharacterStatusCard: View {
 struct CharacterAvatarView: View {
     var imageData: Data?
     var fallbackSystemImage: String = "moon.stars.fill"
+    var size: CGFloat = 54
+    var cornerRadius: CGFloat = 16
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [VNTheme.accent.opacity(0.32), Color(red: 0.23, green: 0.22, blue: 0.54).opacity(0.5)],
@@ -510,14 +903,14 @@ struct CharacterAvatarView: View {
                     .scaledToFill()
             } else {
                 Image(systemName: fallbackSystemImage)
-                    .font(.system(size: 24, weight: .semibold))
+                    .font(.system(size: size * 0.44, weight: .semibold))
                     .foregroundStyle(VNTheme.accentSoft)
             }
         }
-        .frame(width: 54, height: 54)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .stroke(VNTheme.accent.opacity(0.38), lineWidth: 1)
         )
     }
@@ -541,8 +934,102 @@ struct EmptyStoryHintCard: View {
     }
 }
 
+struct MessageRow: View {
+    var message: ConversationMessage
+    var edit: () -> Void
+    var replay: () -> Void
+    var setFeedback: (String) -> Void
+    var previewImage: (Data) -> Void = { _ in }
+
+    static let usesInlineActionButtons = true
+    static let removesLongPressContextMenu = true
+
+    var body: some View {
+        VStack(spacing: 4) {
+            MessageBubble(message: message, previewImage: previewImage)
+            MessageActionBar(
+                message: message,
+                edit: edit,
+                replay: replay,
+                setFeedback: setFeedback
+            )
+        }
+    }
+}
+
+struct MessageActionBar: View {
+    var message: ConversationMessage
+    var edit: () -> Void
+    var replay: () -> Void
+    var setFeedback: (String) -> Void
+
+    static let usesEmojiFeedbackIcons = true
+
+    var body: some View {
+        HStack {
+            if message.role == .user { Spacer(minLength: 40) }
+            HStack(spacing: 6) {
+                tinyIconButton(systemImage: "pencil", label: uiStatic("編輯內容"), action: edit)
+                tinyIconButton(systemImage: "arrow.uturn.right", label: uiStatic("從此分支重跑"), action: replay)
+                if message.role == .assistant {
+                    emojiFeedbackButton(emoji: Self.feedbackEmoji(for: "like"), feedback: "like", label: uiStatic("喜歡"))
+                    emojiFeedbackButton(emoji: Self.feedbackEmoji(for: "dislike"), feedback: "dislike", label: uiStatic("不喜歡"))
+                    if !Self.normalizedFeedback(message.feedback).isEmpty {
+                        tinyIconButton(systemImage: "xmark", label: uiStatic("清除評價")) {
+                            setFeedback("")
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(VNTheme.ink.opacity(0.34), in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1))
+            if message.role != .user { Spacer(minLength: 40) }
+        }
+        .font(.caption2.weight(.semibold))
+    }
+
+    static func feedbackEmoji(for feedback: String) -> String {
+        normalizedFeedback(feedback) == "dislike" ? "👎" : "👍"
+    }
+
+    static func normalizedFeedback(_ feedback: String) -> String {
+        TimeTavernStore.normalizedMessageFeedback(feedback)
+    }
+
+    private func tinyIconButton(systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 10, weight: .bold))
+                .frame(width: 22, height: 22)
+                .foregroundStyle(VNTheme.textSecondary.opacity(0.82))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+
+    private func emojiFeedbackButton(emoji: String, feedback: String, label: String) -> some View {
+        let isSelected = Self.normalizedFeedback(message.feedback) == feedback
+        return Button {
+            setFeedback(isSelected ? "" : feedback)
+        } label: {
+            Text(emoji)
+                .font(.system(size: 12))
+                .frame(width: 22, height: 22)
+                .background(isSelected ? VNTheme.accent.opacity(0.26) : Color.clear, in: Circle())
+                .overlay(Circle().stroke(isSelected ? VNTheme.accentSoft.opacity(0.8) : Color.clear, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+}
+
 struct MessageBubble: View {
     var message: ConversationMessage
+    var previewImage: (Data) -> Void = { _ in }
+    static let usesPartialTextSelectableView = true
+    static let generatedImagesOpenPreviewOnTap = true
 
     var body: some View {
         HStack {
@@ -556,27 +1043,30 @@ struct MessageBubble: View {
                         .font(.caption)
                         .foregroundStyle(VNTheme.accentSoft)
                 }
-                Text(message.content.isEmpty ? uiStatic("生成中...") : message.content)
-                    .textSelection(.enabled)
-                    .foregroundStyle(.white)
+                SelectableMessageText(text: message.content.isEmpty ? uiStatic("生成中...") : message.content)
                 if let imageData = message.imageData, let image = UIImage(data: imageData) {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(Color.white.opacity(0.16), lineWidth: 1)
-                        )
-                        .frame(maxHeight: 260)
+                    Button {
+                        previewImage(imageData)
+                    } label: {
+                        ZStack(alignment: .topTrailing) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxHeight: 260)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                                )
+                            GeneratedImageZoomBadge()
+                                .padding(8)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(uiStatic("放大生成圖片"))
                 }
                 if !message.autoTimeWarning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Label(message.autoTimeWarning, systemImage: "clock.badge.exclamationmark")
-                        .font(.caption)
-                        .foregroundStyle(VNTheme.accentSoft)
-                }
-                if !message.feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Label(message.feedback == "positive" ? uiStatic("喜歡") : uiStatic("不喜歡"), systemImage: message.feedback == "positive" ? "hand.thumbsup.fill" : "hand.thumbsdown.fill")
                         .font(.caption)
                         .foregroundStyle(VNTheme.accentSoft)
                 }
@@ -595,9 +1085,82 @@ struct MessageBubble: View {
     }
 }
 
+struct SelectableMessageText: UIViewRepresentable {
+    var text: String
+    static let supportsPartialTextSelection = true
+    static let isEditable = false
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.backgroundColor = .clear
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isScrollEnabled = false
+        textView.dataDetectorTypes = []
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.textDragInteraction?.isEnabled = false
+        textView.adjustsFontForContentSizeCategory = true
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        applyStyle(to: textView)
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        if textView.text != text {
+            textView.text = text
+        }
+        applyStyle(to: textView)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
+        let maxWidth = max(1, proposal.width ?? UIScreen.main.bounds.width - 104)
+        let fittingHeight = uiView.sizeThatFits(CGSize(width: maxWidth, height: .greatestFiniteMagnitude)).height
+        let measuredWidth = Self.measuredTextWidth(text, font: uiView.font ?? .preferredFont(forTextStyle: .body), maxWidth: maxWidth)
+        return CGSize(width: measuredWidth, height: fittingHeight)
+    }
+
+    private func applyStyle(to textView: UITextView) {
+        textView.textColor = .white
+        textView.tintColor = UIColor(red: 1.0, green: 0.50, blue: 0.72, alpha: 1.0)
+        textView.font = .preferredFont(forTextStyle: .body)
+    }
+
+    static func measuredTextWidth(_ text: String, font: UIFont, maxWidth: CGFloat) -> CGFloat {
+        let value = text.isEmpty ? " " : text
+        let rect = (value as NSString).boundingRect(
+            with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font],
+            context: nil
+        )
+        return min(max(ceil(rect.width) + 1, 1), maxWidth)
+    }
+}
+
 struct VisualNovelComposer: View {
     @EnvironmentObject private var store: TimeTavernStore
     @FocusState.Binding var inputFocused: Bool
+    static let showsPlusInsertMenu = true
+    static let quickInsertItems: [ComposerInsertItem] = [
+        ComposerInsertItem(title: "繼續", text: "｛繼續｝", systemImage: "arrow.forward.circle"),
+        ComposerInsertItem(title: "動作括號", text: "（）", systemImage: "textformat"),
+        ComposerInsertItem(title: "推進場景", text: "｛推进剧情到下一个场景｝", systemImage: "arrow.right"),
+        ComposerInsertItem(title: "時間流逝", text: "｛时间流逝——｝", systemImage: "clock")
+    ]
+    static let slashCommandItems: [ComposerInsertItem] = [
+        ComposerInsertItem(title: "開始對話", text: "/ai_start", systemImage: "play.fill"),
+        ComposerInsertItem(title: "目前狀態", text: "/ai_status", systemImage: "info.circle"),
+        ComposerInsertItem(title: "停止生成", text: "/stop", systemImage: "stop.fill"),
+        ComposerInsertItem(title: "重跑最新回覆", text: "/reload ", systemImage: "arrow.clockwise"),
+        ComposerInsertItem(title: "分支重跑提示", text: "/replay ", systemImage: "arrow.uturn.right"),
+        ComposerInsertItem(title: "自動推演", text: "/run_time 3 請根據目前劇情自然推進。", systemImage: "forward.frame.fill"),
+        ComposerInsertItem(title: "保存對話", text: "/session_save ", systemImage: "tray.and.arrow.down.fill"),
+        ComposerInsertItem(title: "列出存檔", text: "/session_list", systemImage: "archivebox.fill"),
+        ComposerInsertItem(title: "載入存檔", text: "/session_load ", systemImage: "folder.fill"),
+        ComposerInsertItem(title: "指令說明", text: "/ai_help", systemImage: "questionmark.circle")
+    ]
 
     static func isSendDisabled(isGenerating: Bool, text: String) -> Bool {
         !isGenerating && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -613,6 +1176,35 @@ struct VisualNovelComposer: View {
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 12) {
+            Menu {
+                Section(uiStatic("快速輸入")) {
+                    ForEach(Self.quickInsertItems) { item in
+                        Button {
+                            insert(item.text)
+                        } label: {
+                            Label(item.title, systemImage: item.systemImage)
+                        }
+                    }
+                }
+                Section(uiStatic("/ 指令")) {
+                    ForEach(Self.slashCommandItems) { item in
+                        Button {
+                            insert(item.text)
+                        } label: {
+                            Label(item.title, systemImage: item.systemImage)
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 18, weight: .bold))
+                    .frame(width: 40, height: 44)
+                    .foregroundStyle(VNTheme.accentSoft)
+                    .background(Circle().fill(Color.white.opacity(0.10)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(uiStatic("插入快捷內容"))
+
             TextField(uiStatic("輸入對話"), text: $store.composerText, axis: .vertical)
                 .lineLimit(1...5)
                 .focused($inputFocused)
@@ -652,11 +1244,8 @@ struct VisualNovelComposer: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(VNTheme.ink.opacity(0.82))
-                .overlay(.ultraThinMaterial.opacity(0.20))
-        )
+        .background(VNGlassRoundedBackground(cornerRadius: 28, fill: VNTheme.ink.opacity(0.82), materialOpacity: 0.20))
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .stroke(
@@ -674,6 +1263,28 @@ struct VisualNovelComposer: View {
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: inputFocused)
         .accessibilityIdentifier("visualNovelComposer")
     }
+
+    private func insert(_ text: String) {
+        store.composerText = Self.composerTextByInserting(current: store.composerText, insertion: text)
+        inputFocused = true
+    }
+
+    static func composerTextByInserting(current: String, insertion: String) -> String {
+        if current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return insertion
+        }
+        if current.hasSuffix("\n") {
+            return current + insertion
+        }
+        return current + "\n" + insertion
+    }
+}
+
+struct ComposerInsertItem: Identifiable, Hashable {
+    var title: String
+    var text: String
+    var systemImage: String
+    var id: String { text }
 }
 
 struct CharactersView: View {
@@ -1503,6 +2114,7 @@ struct PromptLabView: View {
     @State private var showModeImporter = false
     static let exposesQuickProfileKindAndImageSettings = true
     static let showsExpandedQuickImageSettings = true
+    static let hidesQuickCompressionSummaryEditor = true
 
     var body: some View {
         List {
@@ -1515,6 +2127,16 @@ struct PromptLabView: View {
                         ForEach(store.state.promptModes) { mode in
                             Text(mode.name).tag(mode.id)
                         }
+                    }
+                    .disabled(Self.shouldLockQuickModePicker(state: store.state))
+                    if let caption = activeRoleQuickModeCaption {
+                        Text(caption)
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.accentSoft)
+                    } else if store.state.activeRoleCard != nil {
+                        Text(ModelContentView.emptyStateText(state: store.state))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
                     }
                     if let mode = selectedMode {
                         Picker(uiStatic("大模型"), selection: selectedProfileBinding(modeID: mode.id)) {
@@ -1553,8 +2175,6 @@ struct PromptLabView: View {
                                     }
                                 }
                             }
-                            TextEditor(text: profileSummaryBinding(modeID: mode.id, profileID: profile.id))
-                                .frame(minHeight: 120)
                             Text(uiStatic("已壓縮到第 \(profile.compressedThroughTurnNumber) 回合"))
                                 .font(.caption)
                                 .foregroundStyle(VNTheme.textSecondary)
@@ -1636,6 +2256,12 @@ struct PromptLabView: View {
                 url.stopAccessingSecurityScopedResource()
             }
         }
+        .onAppear {
+            syncQuickModeWithActiveRoleCard()
+        }
+        .onChange(of: Self.activeRolePromptModeSignature(state: store.state)) { _, _ in
+            syncQuickModeWithActiveRoleCard()
+        }
         .onDisappear { store.persist() }
     }
 
@@ -1647,6 +2273,31 @@ struct PromptLabView: View {
         offsets.compactMap { modes.indices.contains($0) ? modes[$0].id : nil }
     }
 
+    static func activeRolePromptModeID(state: AppState) -> String? {
+        ModelContentView.visiblePromptModeIDs(state: state).first
+    }
+
+    static func effectiveQuickModeID(state: AppState, selectedModeID: String) -> String {
+        if let activeModeID = activeRolePromptModeID(state: state) {
+            return activeModeID
+        }
+        if state.promptModes.contains(where: { $0.id == selectedModeID }) {
+            return selectedModeID
+        }
+        return state.promptModes.first?.id ?? ""
+    }
+
+    static func shouldLockQuickModePicker(state: AppState) -> Bool {
+        activeRolePromptModeID(state: state) != nil
+    }
+
+    static func activeRolePromptModeSignature(state: AppState) -> String {
+        guard let roleCard = state.activeRoleCard else { return "inactive" }
+        let promptModeIDs = state.promptModes.map(\.id).joined(separator: ",")
+        let visibleIDs = ModelContentView.visiblePromptModeIDs(state: state).joined(separator: ",")
+        return [roleCard.id, roleCard.promptModeId, roleCard.mode.rawValue, visibleIDs, promptModeIDs].joined(separator: "|")
+    }
+
     private func deleteModes(at offsets: IndexSet) {
         let ids = Self.modeIDs(at: offsets, in: store.state.promptModes)
         store.state.promptModes.removeAll { ids.contains($0.id) && !Self.isBuiltIn($0.id) }
@@ -1654,10 +2305,7 @@ struct PromptLabView: View {
     }
 
     private var effectiveModeID: String {
-        if store.state.promptModes.contains(where: { $0.id == selectedQuickModeID }) {
-            return selectedQuickModeID
-        }
-        return store.state.promptModes.first?.id ?? ""
+        Self.effectiveQuickModeID(state: store.state, selectedModeID: selectedQuickModeID)
     }
 
     private var selectedMode: PromptModeConfig? {
@@ -1668,10 +2316,28 @@ struct PromptLabView: View {
         Binding(
             get: { effectiveModeID },
             set: {
+                guard !Self.shouldLockQuickModePicker(state: store.state) else { return }
                 selectedQuickModeID = $0
                 selectedQuickProfileID = ""
             }
         )
+    }
+
+    private var activeRoleQuickModeCaption: String? {
+        guard let roleCard = store.state.activeRoleCard,
+              let modeID = Self.activeRolePromptModeID(state: store.state),
+              let mode = store.state.promptModes.first(where: { $0.id == modeID })
+        else { return nil }
+        let roleName = roleCard.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? uiStatic("未命名角色卡") : roleCard.name
+        return "\(uiStatic("已跟隨目前角色卡"))：\(roleName) · \(mode.name)"
+    }
+
+    private func syncQuickModeWithActiveRoleCard() {
+        guard let activeModeID = Self.activeRolePromptModeID(state: store.state),
+              selectedQuickModeID != activeModeID
+        else { return }
+        selectedQuickModeID = activeModeID
+        selectedQuickProfileID = ""
     }
 
     private func selectedProfileBinding(modeID: String) -> Binding<String> {
@@ -1754,18 +2420,6 @@ struct PromptLabView: View {
         )
     }
 
-    private func profileSummaryBinding(modeID: String, profileID: String) -> Binding<String> {
-        Binding(
-            get: {
-                profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue.summary ?? ""
-            },
-            set: { next in
-                guard var profile = profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue else { return }
-                profile.summary = next
-                profileBinding(modeID: modeID, profileID: profileID)?.wrappedValue = profile
-            }
-        )
-    }
 }
 
 struct PromptModeEditorView: View {
@@ -2205,9 +2859,14 @@ struct TriggerActionEditorView: View {
     @Binding var action: CompressionTriggerAction
     static let exposesFullImageGenerationSettings = true
     static func parseTurnList(_ value: String) -> [Int] {
-        value
-            .split(separator: ",")
+        let separatorCharacters = ",，、;；|/／"
+        let parsed = value
+            .split { character in
+                character.isWhitespace || separatorCharacters.contains(character)
+            }
             .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { $0 >= 0 }
+        return Array(Set(parsed)).sorted()
     }
 
     var body: some View {
@@ -2230,8 +2889,11 @@ struct TriggerActionEditorView: View {
             Section(uiStatic("觸發條件")) {
                 Toggle(uiStatic("每輪觸發"), isOn: $action.triggers.everyTurn)
                 Toggle(uiStatic("達到上下文輪數觸發"), isOn: $action.triggers.roundLimit)
-                TextField(uiStatic("指定回合，用逗號分隔"), text: intListBinding($action.triggers.turns))
+                TextField(uiStatic("指定回合，例如 5 10 15 20"), text: intListBinding($action.triggers.turns))
                     .keyboardType(.numbersAndPunctuation)
+                Text(uiStatic("可用空格、逗號、頓號或分號分隔；0 代表開始觸發。指定回合會像網頁端一樣按正文上限週期重複。"))
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
                 TextField(uiStatic("關鍵字，用逗號分隔"), text: stringListBinding($action.triggers.keywords))
                 TextField(uiStatic("關鍵字來源"), text: $action.triggers.keywordSource)
             }
@@ -3138,17 +3800,29 @@ struct NovelAIOutputPanel: View {
 
 struct NovelAIHistoryPanel: View {
     @EnvironmentObject private var store: TimeTavernStore
+    @State private var previewImage: ImagePreviewItem?
+    static let generatedImagesOpenPreviewOnTap = true
 
     var body: some View {
         List {
             ForEach(store.state.novelAIAlbum) { item in
                 VStack(alignment: .leading, spacing: 8) {
                     if let image = UIImage(data: item.imageData) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxHeight: 260)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        Button {
+                            previewImage = ImagePreviewItem(title: item.fileName, imageData: item.imageData)
+                        } label: {
+                            ZStack(alignment: .topTrailing) {
+                                Image(uiImage: image)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(maxHeight: 260)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                GeneratedImageZoomBadge()
+                                    .padding(8)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(uiStatic("放大生成圖片"))
                     }
                     Text(item.prompt)
                         .font(.caption)
@@ -3176,6 +3850,9 @@ struct NovelAIHistoryPanel: View {
             .onDelete(perform: store.deleteNovelAIAlbumItems)
         }
         .visualNovelListChrome()
+        .fullScreenCover(item: $previewImage) { item in
+            GeneratedImagePreview(item: item)
+        }
     }
 
     private static func exportURL(for item: NovelAIAlbumItem) -> URL? {
@@ -3469,6 +4146,8 @@ struct SettingsView: View {
 
 struct LogView: View {
     @EnvironmentObject private var store: TimeTavernStore
+    @Environment(\.dismiss) private var dismiss
+    static let hasCloseToolbarAction = true
 
     var body: some View {
         NavigationStack {
@@ -3516,6 +4195,11 @@ struct LogView: View {
             }
             .visualNovelListChrome()
             .navigationTitle("AI Logs")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(uiStatic("關閉")) { dismiss() }
+                }
+            }
         }
     }
 
@@ -3563,14 +4247,50 @@ struct LogView: View {
 
 struct ModelContentView: View {
     @EnvironmentObject private var store: TimeTavernStore
+    @Environment(\.dismiss) private var dismiss
+    static let hasCloseToolbarAction = true
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach($store.state.promptModes) { $mode in
-                    ForEach($mode.compressionProfiles) { $profile in
-                        Section("\(mode.name) · \(profile.name)") {
-                            TextEditor(text: $profile.summary).frame(minHeight: 150)
+                let visibleIndices = Self.visiblePromptModeIndices(state: store.state)
+                Section(uiStatic("目前角色卡")) {
+                    if let roleCard = store.state.activeRoleCard {
+                        Text("\(uiStatic("角色卡"))：\(roleCard.name.isEmpty ? uiStatic("未命名") : roleCard.name)")
+                        Text("\(uiStatic("顯示模式"))：\(Self.visiblePromptModeNames(state: store.state).joined(separator: " / "))")
+                            .foregroundStyle(VNTheme.accentSoft)
+                        Text(uiStatic("模型內容只顯示目前角色卡會命中的模式，例如多人、開放世界或自訂模式。"))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+                    } else {
+                        Text(uiStatic("尚未開始角色卡"))
+                            .foregroundStyle(VNTheme.textSecondary)
+                        Text(uiStatic("請先在角色頁啟用角色卡；模型內容會按角色卡的 Prompt 模式顯示。"))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+                    }
+                }
+                if visibleIndices.isEmpty {
+                    Section(uiStatic("模型內容")) {
+                        Text(Self.emptyStateText(state: store.state))
+                            .foregroundStyle(VNTheme.textSecondary)
+                    }
+                } else {
+                    ForEach(visibleIndices, id: \.self) { modeIndex in
+                        if store.state.promptModes.indices.contains(modeIndex) {
+                            let mode = store.state.promptModes[modeIndex]
+                            if mode.compressionProfiles.isEmpty {
+                                Section(mode.name) {
+                                    Text(uiStatic("此模式沒有大模型內容。"))
+                                        .foregroundStyle(VNTheme.textSecondary)
+                                }
+                            } else {
+                                ForEach($store.state.promptModes[modeIndex].compressionProfiles) { $profile in
+                                    Section("\(mode.name) · \(profile.name)") {
+                                        TextEditor(text: $profile.summary).frame(minHeight: 150)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -3578,9 +4298,50 @@ struct ModelContentView: View {
             .visualNovelListChrome()
             .navigationTitle(uiStatic("模型內容"))
             .toolbar {
-                Button(uiStatic("保存")) { store.persist() }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(uiStatic("關閉")) { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(uiStatic("保存")) { store.persist() }
+                }
             }
         }
+    }
+
+    static func visiblePromptModeIndices(state: AppState) -> [Int] {
+        guard let roleCard = state.activeRoleCard else { return [] }
+        let promptModeID = roleCard.promptModeId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !promptModeID.isEmpty {
+            let idMatches = state.promptModes.indices.filter { state.promptModes[$0].id == promptModeID }
+            if !idMatches.isEmpty {
+                return Array(idMatches)
+            }
+        }
+        let roleMode = roleCard.mode.rawValue
+        let modeMatches = state.promptModes.indices.filter {
+            state.promptModes[$0].mode == roleMode || state.promptModes[$0].id == roleMode
+        }
+        return Array(modeMatches)
+    }
+
+    static func visiblePromptModeIDs(state: AppState) -> [String] {
+        visiblePromptModeIndices(state: state).map { state.promptModes[$0].id }
+    }
+
+    static func visiblePromptModeNames(state: AppState) -> [String] {
+        let names = visiblePromptModeIndices(state: state).map { state.promptModes[$0].name }
+        if !names.isEmpty { return names }
+        if let roleCard = state.activeRoleCard {
+            return [roleCard.mode.title]
+        }
+        return []
+    }
+
+    static func emptyStateText(state: AppState) -> String {
+        guard let roleCard = state.activeRoleCard else {
+            return uiStatic("尚未啟用角色卡。")
+        }
+        return "\(uiStatic("找不到角色卡指定的 Prompt 模式"))：\(roleCard.promptModeId.isEmpty ? roleCard.mode.rawValue : roleCard.promptModeId)"
     }
 }
 

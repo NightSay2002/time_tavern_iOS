@@ -127,10 +127,92 @@ final class TimeTavernStore: ObservableObject {
         let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         composerText = ""
+        if handleSlashCommandIfNeeded(text) {
+            return
+        }
         send(text)
     }
 
+    @discardableResult
+    func handleSlashCommandIfNeeded(_ text: String) -> Bool {
+        guard let command = Self.slashCommandParts(text) else { return false }
+        switch command.keyword {
+        case "ai_help", "help":
+            statusText = Self.slashCommandHelpText
+        case "ai_status", "status":
+            let activeRoleName = state.activeRoleCard?.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let roleName = activeRoleName?.isEmpty == false ? activeRoleName ?? "未開始" : state.activeAssistantCard?.displayName ?? "未開始"
+            statusText = "角色：\(roleName)；對話 \(state.conversation.count) 則；\(isGenerating ? "生成中" : "閒置")。"
+        case "stop":
+            let wasGenerating = isGenerating
+            cancelGeneration()
+            statusText = wasGenerating ? "已停止生成。" : "目前沒有正在生成。"
+        case "ai_start", "start":
+            if let roleCard = state.activeRoleCard {
+                start(roleCard: roleCard)
+            } else {
+                statusText = "請先在角色頁選擇角色卡。"
+            }
+        case "reload":
+            regenerateLatestAssistant()
+        case "run_time":
+            let parsed = Self.parseRunTimeArguments(command.argumentText)
+            runTime(turns: parsed.turns, seedMessage: parsed.message)
+        case "session_save":
+            saveSession(named: command.argumentText.isEmpty ? "Slash 存檔" : command.argumentText)
+            statusText = "已保存目前對話。"
+        case "session_list":
+            let names = state.savedSessions.prefix(5).map(\.name).joined(separator: "、")
+            statusText = names.isEmpty ? "沒有可載入的存檔。" : "最近存檔：\(names)"
+        case "session_load":
+            guard !command.argumentText.isEmpty else {
+                statusText = "請提供存檔 ID 或名稱。"
+                return true
+            }
+            guard let session = state.savedSessions.first(where: { session in
+                session.id == command.argumentText || session.name.localizedCaseInsensitiveContains(command.argumentText)
+            }) else {
+                statusText = "找不到指定存檔。"
+                return true
+            }
+            load(session: session)
+            statusText = "已載入存檔：\(session.name)"
+        case "replay":
+            statusText = "手機端請長按訊息選擇「從此分支重跑」。"
+        default:
+            return false
+        }
+        return true
+    }
+
+    static func slashCommandParts(_ text: String) -> (keyword: String, argumentText: String)? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/") else { return nil }
+        let body = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return ("ai_help", "") }
+        let parts = body.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        let keyword = parts.first.map { String($0).lowercased() } ?? "ai_help"
+        let argumentText = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        return (keyword, argumentText)
+    }
+
+    static func parseRunTimeArguments(_ text: String) -> (turns: Int, message: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = trimmed.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        if let first = parts.first, let turns = Int(first) {
+            let message = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : "請根據目前劇情自然推進。"
+            return (turns, message)
+        }
+        return (3, trimmed.isEmpty ? "請根據目前劇情自然推進。" : trimmed)
+    }
+
+    static let slashCommandHelpText = "/ai_start、/ai_status、/stop、/reload、/replay、/run_time、/session_save、/session_list、/session_load"
+
     func send(_ text: String) {
+        guard !isGenerating else {
+            statusText = uiStatic("生成中，請先停止目前回覆。")
+            return
+        }
         generationTask?.cancel()
         isGenerating = true
         let userTurn = state.conversation.filter { $0.role == .user }.count + 1
@@ -386,6 +468,10 @@ final class TimeTavernStore: ObservableObject {
     }
 
     func regenerateLatestAssistant() {
+        guard !isGenerating else {
+            statusText = uiStatic("生成中，請先停止目前回覆。")
+            return
+        }
         guard let assistantIndex = state.conversation.lastIndex(where: { $0.role == .assistant }) else { return }
         let user = state.conversation[..<assistantIndex].last(where: { $0.role == .user })
         guard let user else { return }
@@ -396,6 +482,10 @@ final class TimeTavernStore: ObservableObject {
     }
 
     func replay(from message: ConversationMessage, with newContent: String) {
+        guard !isGenerating else {
+            statusText = uiStatic("生成中，請先停止目前回覆。")
+            return
+        }
         guard let index = state.conversation.firstIndex(where: { $0.id == message.id }) else { return }
         state.savedSessions.insert(conversationEngine.branchSession(from: state, name: "分支前備份"), at: 0)
         state.conversation.removeSubrange(index..<state.conversation.endIndex)
@@ -412,12 +502,27 @@ final class TimeTavernStore: ObservableObject {
 
     func setMessageFeedback(id: String, feedback: String) {
         guard let index = state.conversation.firstIndex(where: { $0.id == id }) else { return }
-        state.conversation[index].feedback = ["positive", "negative"].contains(feedback) ? feedback : ""
+        state.conversation[index].feedback = Self.normalizedMessageFeedback(feedback)
         state.conversation[index].updatedAt = Date()
         persist()
     }
 
+    static func normalizedMessageFeedback(_ feedback: String) -> String {
+        switch feedback.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "like", "liked", "positive", "up", "thumbsup", "👍":
+            return "like"
+        case "dislike", "negative", "down", "thumbsdown", "👎":
+            return "dislike"
+        default:
+            return ""
+        }
+    }
+
     func runTime(turns: Int, seedMessage: String) {
+        guard !isGenerating else {
+            statusText = uiStatic("生成中，請先停止目前回覆。")
+            return
+        }
         guard let normalizedTurns = ConversationEngine.normalizedRuntimeTurns(turns) else {
             statusText = uiStatic("請提供有效輪數，最少為 1。")
             return
