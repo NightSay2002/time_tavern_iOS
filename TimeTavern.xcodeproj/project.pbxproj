@@ -15,7 +15,6 @@
 		100000000000000000000006 /* TimeTavernStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000106 /* TimeTavernStore.swift */; };
 		100000000000000000000007 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000107 /* Views.swift */; };
 		100000000000000000000008 /* Resources/Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000108 /* Resources/Assets.xcassets */; };
-		100000000000000000000009 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 100000000000000000000401 /* ZIPFoundation */; };
 		100000000000000000000010 /* TimeTavernTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000201 /* TimeTavernTests.swift */; };
 		100000000000000000000011 /* Resources/WebDefaults in Resources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000110 /* Resources/WebDefaults */; };
 /* End PBXBuildFile section */
@@ -50,7 +49,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				100000000000000000000009 /* ZIPFoundation in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -123,7 +121,6 @@
 			);
 			name = TimeTavern;
 			packageProductDependencies = (
-				100000000000000000000401 /* ZIPFoundation */,
 			);
 			productName = TimeTavern;
 			productReference = 100000000000000000000109 /* TimeTavern.app */;
@@ -177,7 +174,6 @@
 			mainGroup = 100000000000000000000501;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				100000000000000000000400 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
 			);
 			productRefGroup = 100000000000000000000504 /* Products */;
 			projectDirPath = "";
@@ -497,24 +493,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		100000000000000000000400 /* XCRemoteSwiftPackageReference "ZIPFoundation" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/weichsel/ZIPFoundation";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.9.19;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		100000000000000000000401 /* ZIPFoundation */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 100000000000000000000400 /* XCRemoteSwiftPackageReference "ZIPFoundation" */;
-			productName = ZIPFoundation;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 100000000000000000000500 /* Project object */;
 }

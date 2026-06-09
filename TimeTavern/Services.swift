@@ -1,7 +1,6 @@
 import Foundation
 import Security
 import SwiftData
-import ZIPFoundation
 
 struct ChatAPIMessage: Codable, Hashable {
     var role: String
@@ -13,6 +12,16 @@ struct ChatCompletionResult: Hashable {
     var reasoningContent: String
     var model: String
     var usage: AIUsage?
+}
+
+struct ChatStreamDelta: Hashable, Sendable {
+    enum Kind: String, Sendable {
+        case reasoning
+        case content
+    }
+
+    var kind: Kind
+    var text: String
 }
 
 struct AIUsage: Codable, Hashable {
@@ -297,7 +306,7 @@ final class DeepSeekClient {
         apiKey: String,
         settings: APISettings,
         messages: [ChatAPIMessage],
-        onDelta: @escaping @Sendable (String) -> Void
+        onDelta: @escaping @Sendable (ChatStreamDelta) -> Void
     ) async throws -> ChatCompletionResult {
         try await completion(apiKey: apiKey, settings: settings, messages: messages, stream: true, onDelta: onDelta)
     }
@@ -315,7 +324,7 @@ final class DeepSeekClient {
         settings: APISettings,
         messages: [ChatAPIMessage],
         stream: Bool,
-        onDelta: (@Sendable (String) -> Void)? = nil
+        onDelta: (@Sendable (ChatStreamDelta) -> Void)? = nil
     ) async throws -> ChatCompletionResult {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw TimeTavernError.missingDeepSeekKey
@@ -355,10 +364,11 @@ final class DeepSeekClient {
                 }
                 if let delta = chunk.choices.first?.delta.reasoningContent, !delta.isEmpty {
                     reasoning += delta
+                    onDelta?(ChatStreamDelta(kind: .reasoning, text: delta))
                 }
                 if let delta = chunk.choices.first?.delta.content, !delta.isEmpty {
                     content += delta
-                    onDelta?(delta)
+                    onDelta?(ChatStreamDelta(kind: .content, text: delta))
                 }
             }
             return ChatCompletionResult(content: content, reasoningContent: reasoning, model: settings.deepSeekModel, usage: usage)
@@ -515,7 +525,7 @@ final class NovelAIClient {
             let (data, response) = try await session.data(for: request)
             try validateHTTP(response, data: data)
             results.append(contentsOf: try extractImages(
-                fromZipData: data,
+                fromImageResponseData: data,
                 prompt: prompt,
                 negativePrompt: studioSettings.negativePrompt,
                 model: payload.model
@@ -1056,36 +1066,37 @@ final class NovelAIClient {
         String(format: "%.1f", (value * 10).rounded() / 10)
     }
 
-    private func extractImages(fromZipData data: Data, prompt: String, negativePrompt: String, model: String) throws -> [NovelAIAlbumItem] {
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".zip")
-        try data.write(to: tempURL)
-        defer { try? FileManager.default.removeItem(at: tempURL) }
-        let archive = try Archive(url: tempURL, accessMode: .read, pathEncoding: nil)
-        var items: [NovelAIAlbumItem] = []
-        for entry in archive {
-            let lower = entry.path.lowercased()
-            guard lower.hasSuffix(".png") || lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".webp") else {
-                continue
-            }
-            var imageData = Data()
-            _ = try archive.extract(entry) { chunk in
-                imageData.append(chunk)
-            }
-            let mimeType = lower.hasSuffix(".webp") ? "image/webp" : lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") ? "image/jpeg" : "image/png"
-            items.append(NovelAIAlbumItem(
-                fileName: URL(fileURLWithPath: entry.path).lastPathComponent,
-                mimeType: mimeType,
-                prompt: prompt,
-                negativePrompt: negativePrompt,
-                model: model,
-                imageData: imageData,
-                metadata: "{}"
-            ))
+    private func extractImages(fromImageResponseData data: Data, prompt: String, negativePrompt: String, model: String) throws -> [NovelAIAlbumItem] {
+        if let imageType = Self.detectImageType(in: data) {
+            return [
+                NovelAIAlbumItem(
+                    fileName: "novelai-\(UUID().uuidString).\(imageType.fileExtension)",
+                    mimeType: imageType.mimeType,
+                    prompt: prompt,
+                    negativePrompt: negativePrompt,
+                    model: model,
+                    imageData: data,
+                    metadata: "{}"
+                )
+            ]
         }
-        if items.isEmpty {
-            throw TimeTavernError.network("NovelAI 沒有回傳圖片。")
+        throw TimeTavernError.network("NovelAI 沒有回傳可用圖片。")
+    }
+
+    private static func detectImageType(in data: Data) -> (mimeType: String, fileExtension: String)? {
+        guard data.count >= 12 else { return nil }
+        if data.starts(with: [0x89, 0x50, 0x4E, 0x47]) {
+            return ("image/png", "png")
         }
-        return items
+        if data.starts(with: [0xFF, 0xD8, 0xFF]) {
+            return ("image/jpeg", "jpg")
+        }
+        let riff = String(data: data.prefix(4), encoding: .ascii)
+        let webp = String(data: data.dropFirst(8).prefix(4), encoding: .ascii)
+        if riff == "RIFF", webp == "WEBP" {
+            return ("image/webp", "webp")
+        }
+        return nil
     }
 
     private func validateHTTP(_ response: URLResponse, data: Data = Data()) throws {

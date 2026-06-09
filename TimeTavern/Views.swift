@@ -1030,6 +1030,7 @@ struct MessageBubble: View {
     var previewImage: (Data) -> Void = { _ in }
     static let usesPartialTextSelectableView = true
     static let generatedImagesOpenPreviewOnTap = true
+    static let compressionNoticeText = "已壓縮上下文"
 
     var body: some View {
         HStack {
@@ -1039,11 +1040,14 @@ struct MessageBubble: View {
                     .font(.caption.bold())
                     .foregroundStyle(VNTheme.accentSoft)
                 if message.compressionNotice {
-                    Label(uiStatic("模型內容已更新"), systemImage: "tray.and.arrow.down.fill")
+                    Label(uiStatic(Self.compressionNoticeText), systemImage: "tray.and.arrow.down.fill")
                         .font(.caption)
                         .foregroundStyle(VNTheme.accentSoft)
                 }
-                SelectableMessageText(text: message.content.isEmpty ? uiStatic("生成中...") : message.content)
+                let displayText = Self.displayText(for: message)
+                if !displayText.isEmpty {
+                    SelectableMessageText(text: displayText)
+                }
                 if let imageData = message.imageData, let image = UIImage(data: imageData) {
                     Button {
                         previewImage(imageData)
@@ -1082,6 +1086,13 @@ struct MessageBubble: View {
             )
             if message.role != .user { Spacer(minLength: 40) }
         }
+    }
+
+    static func displayText(for message: ConversationMessage) -> String {
+        if !message.content.isEmpty {
+            return message.content
+        }
+        return message.streamingReasoningPreview
     }
 }
 
@@ -1408,6 +1419,7 @@ struct AssistantCardRow: View {
             }
         }
     }
+
 }
 
 struct AssistantPromptEditorView: View {
@@ -1517,8 +1529,17 @@ struct RoleCardEditorView: View {
     @EnvironmentObject private var store: TimeTavernStore
     @Environment(\.dismiss) private var dismiss
     @State var card: RoleCard
+    @State private var selectedOpeningId: String
+    @State private var selectedLorebookId: String?
     @State private var coverPickerItem: PhotosPickerItem?
     @State private var coverCropDraft: RoleCardCoverCropDraft?
+
+    init(card: RoleCard) {
+        let normalized = Self.normalizedForSave(card)
+        _card = State(initialValue: normalized)
+        _selectedOpeningId = State(initialValue: normalized.activeOpeningDialogueId)
+        _selectedLorebookId = State(initialValue: normalized.lorebooks.first?.id)
+    }
 
     var body: some View {
         NavigationStack {
@@ -1592,48 +1613,73 @@ struct RoleCardEditorView: View {
                     }
                     Button(uiStatic("新增欄位")) { card.customSections.append(CustomSection(name: "新欄位")) }
                 }
-                Section(uiStatic("開場")) {
-                    ForEach($card.openingDialogues) { $opening in
-                        VStack(alignment: .leading) {
-                            HStack {
-                                Text(opening.name.isEmpty ? uiStatic("開場") : opening.name)
-                                    .font(.headline)
-                                Spacer()
-                                Button(role: .destructive) {
-                                    deleteOpening(id: opening.id)
-                                } label: {
-                                    Image(systemName: "trash")
+                Section(uiStatic("開場對話")) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text(uiStatic("選擇開場"))
+                                .font(.headline)
+                            Spacer()
+                            Button {
+                                addOpening()
+                            } label: {
+                                Label(uiStatic("新增開場"), systemImage: "plus")
+                            }
+                        }
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                ForEach(Array(card.openingDialogues.enumerated()), id: \.element.id) { index, opening in
+                                    openingTab(opening: opening, index: index)
                                 }
                             }
-                            TextField(uiStatic("標題"), text: $opening.name)
-                            TextEditor(text: $opening.content).frame(minHeight: 90)
+                            .padding(.vertical, 2)
                         }
+
+                        Text(uiStatic("開始角色卡時只會使用目前選中的開場。其他開場保留為可切換版本，不會一起放入對話。"))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+
+                        let opening = selectedOpeningBinding
+                        TextField(uiStatic("標題"), text: opening.name)
+                        TextEditor(text: opening.content)
+                            .frame(minHeight: 120)
                     }
-                    Button(uiStatic("新增開場")) { card.openingDialogues.append(OpeningDialogue(name: "開場 \(card.openingDialogues.count + 1)")) }
                 }
                 Section(uiStatic("世界書")) {
-                    ForEach($card.lorebooks) { $entry in
-                        VStack(alignment: .leading) {
-                            HStack {
-                                Text(entry.title.isEmpty ? uiStatic("世界書") : entry.title)
-                                    .font(.headline)
-                                Spacer()
-                                Button(role: .destructive) {
-                                    deleteLorebook(id: entry.id)
-                                } label: {
-                                    Image(systemName: "trash")
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(uiStatic("條目會在最近對話或本輪輸入命中關鍵字時，自動插入到角色卡區塊下方。永久啟用的條目會直接放入角色卡自定義內容位置。"))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+
+                        HStack {
+                            Text(uiStatic("世界書條目"))
+                                .font(.headline)
+                            Spacer()
+                            Button {
+                                addLorebook()
+                            } label: {
+                                Label(uiStatic("新增條目"), systemImage: "plus")
+                            }
+                        }
+
+                        if card.lorebooks.isEmpty {
+                            Text(uiStatic("尚未建立世界書條目。"))
+                                .font(.caption)
+                                .foregroundStyle(VNTheme.textSecondary)
+                                .padding(.vertical, 6)
+                        } else {
+                            VStack(spacing: 8) {
+                                ForEach(Array(card.lorebooks.enumerated()), id: \.element.id) { index, entry in
+                                    lorebookRow(entry: entry, index: index)
                                 }
                             }
-                            TextField(uiStatic("標題"), text: $entry.title)
-                            TextField(uiStatic("關鍵字，用逗號分隔"), text: Binding(
-                                get: { entry.keywords.joined(separator: ", ") },
-                                set: { entry.keywords = $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
-                            ))
-                            TextEditor(text: $entry.content).frame(minHeight: 90)
-                            Toggle(uiStatic("啟用"), isOn: $entry.enabled)
+                        }
+
+                        if let index = selectedLorebookIndex {
+                            Divider()
+                            lorebookEditor(entry: $card.lorebooks[index])
                         }
                     }
-                    Button(uiStatic("新增世界書")) { card.lorebooks.append(LorebookEntry(title: "世界書")) }
                 }
                 Section("JSON") {
                     Button {
@@ -1650,6 +1696,10 @@ struct RoleCardEditorView: View {
             }
             .visualNovelListChrome()
             .navigationTitle(card.name.isEmpty ? uiStatic("角色卡") : card.name)
+            .onAppear {
+                ensureSelectedOpeningIsValid()
+                ensureSelectedLorebookIsValid()
+            }
             .onChange(of: coverPickerItem) { _, newValue in
                 guard let newValue else { return }
                 Task {
@@ -1675,11 +1725,183 @@ struct RoleCardEditorView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(uiStatic("保存")) {
+                        card.activeOpeningDialogueId = selectedOpeningId
                         card = Self.normalizedForSave(card)
                         store.update(roleCard: card)
                         dismiss()
                     }
                 }
+            }
+        }
+    }
+
+    private var selectedOpeningBinding: Binding<OpeningDialogue> {
+        Binding(
+            get: {
+                guard !card.openingDialogues.isEmpty else { return OpeningDialogue() }
+                let index = card.openingDialogues.firstIndex { $0.id == selectedOpeningId } ?? 0
+                return card.openingDialogues[index]
+            },
+            set: { updated in
+                guard !card.openingDialogues.isEmpty else { return }
+                let fallbackIndex = card.openingDialogues.firstIndex { $0.id == selectedOpeningId } ?? 0
+                let index = card.openingDialogues.firstIndex { $0.id == updated.id } ?? fallbackIndex
+                guard card.openingDialogues.indices.contains(index) else { return }
+                card.openingDialogues[index] = updated
+                selectedOpeningId = updated.id
+                card.activeOpeningDialogueId = updated.id
+            }
+        )
+    }
+
+    private func openingTab(opening: OpeningDialogue, index: Int) -> some View {
+        let isSelected = opening.id == selectedOpeningId
+        return HStack(spacing: 0) {
+            Button {
+                selectOpening(id: opening.id)
+            } label: {
+                Text(Self.openingTabTitle(opening, index: index))
+                    .font(.caption.weight(isSelected ? .semibold : .regular))
+                    .lineLimit(1)
+                    .padding(.vertical, 9)
+                    .padding(.leading, 12)
+                    .padding(.trailing, 8)
+            }
+            .buttonStyle(.plain)
+
+            Button(role: .destructive) {
+                deleteOpening(id: opening.id)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.bold))
+                    .padding(.vertical, 9)
+                    .padding(.leading, 2)
+                    .padding(.trailing, 10)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(uiStatic("刪除這個開場"))
+        }
+        .foregroundStyle(isSelected ? .white : VNTheme.textSecondary)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(isSelected ? VNTheme.accent.opacity(0.24) : Color.white.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(isSelected ? VNTheme.accent.opacity(0.46) : Color.white.opacity(0.14), lineWidth: 1)
+        )
+    }
+
+    private var selectedLorebookIndex: Int? {
+        guard let selectedLorebookId else { return nil }
+        return card.lorebooks.firstIndex { $0.id == selectedLorebookId }
+    }
+
+    private func lorebookRow(entry: LorebookEntry, index: Int) -> some View {
+        let isSelected = entry.id == selectedLorebookId
+        return HStack(spacing: 8) {
+            Button {
+                selectLorebook(id: entry.id)
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(Self.lorebookSummaryTitle(entry, index: index))
+                        .font(.caption.weight(isSelected ? .semibold : .regular))
+                        .lineLimit(2)
+                    Text(entry.keywords.isEmpty ? uiStatic("無關鍵字") : entry.keywords.joined(separator: ", "))
+                        .font(.caption2)
+                        .foregroundStyle(VNTheme.textSecondary.opacity(0.82))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                toggleLorebookEnabled(id: entry.id)
+            } label: {
+                Text(entry.enabled ? uiStatic("啟用") : uiStatic("停用"))
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(entry.enabled ? VNTheme.accent.opacity(0.20) : Color.white.opacity(0.08))
+                    )
+            }
+            .buttonStyle(.plain)
+
+            Button(role: .destructive) {
+                deleteLorebook(id: entry.id)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.caption.weight(.bold))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(uiStatic("刪除世界書條目"))
+        }
+        .foregroundStyle(isSelected ? .white : VNTheme.textSecondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(isSelected ? VNTheme.accent.opacity(0.20) : Color.white.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isSelected ? VNTheme.accent.opacity(0.42) : Color.white.opacity(0.14), lineWidth: 1)
+        )
+    }
+
+    private func lorebookEditor(entry: Binding<LorebookEntry>) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle(uiStatic("啟用"), isOn: entry.enabled)
+
+            Toggle(uiStatic("永久啟用（放入角色卡自定義內容位置）"), isOn: entry.permanent)
+
+            TextField(uiStatic("條目標題 (Key)"), text: entry.title)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(uiStatic("關鍵字 (Keywords)"))
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
+                TextEditor(text: Binding(
+                    get: { entry.wrappedValue.keywords.joined(separator: ", ") },
+                    set: { entry.wrappedValue.keywords = Self.parseLorebookTerms($0) }
+                ))
+                .frame(minHeight: 72)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(uiStatic("第二關鍵字"))
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
+                Text(uiStatic("有填時，需要主關鍵字 + 第二關鍵字同時命中才會觸發。"))
+                    .font(.caption2)
+                    .foregroundStyle(VNTheme.textSecondary.opacity(0.82))
+                TextEditor(text: Binding(
+                    get: { entry.wrappedValue.secondaryKeywords.joined(separator: ", ") },
+                    set: { entry.wrappedValue.secondaryKeywords = Self.parseLorebookTerms($0) }
+                ))
+                .frame(minHeight: 72)
+            }
+
+            Stepper(
+                value: Binding(
+                    get: { LorebookEntry.clampedProbability(entry.wrappedValue.probability) },
+                    set: { entry.wrappedValue.probability = LorebookEntry.clampedProbability($0) }
+                ),
+                in: 0...100,
+                step: 1
+            ) {
+                Text(uiStatic("百分比啟用 \(LorebookEntry.clampedProbability(entry.wrappedValue.probability))%"))
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(uiStatic("內容 (Content)"))
+                    .font(.caption)
+                    .foregroundStyle(VNTheme.textSecondary)
+                TextEditor(text: entry.content)
+                    .frame(minHeight: 120)
             }
         }
     }
@@ -1692,8 +1914,84 @@ struct RoleCardEditorView: View {
         if !next.openingDialogues.contains(where: { $0.id == next.activeOpeningDialogueId }) {
             next.activeOpeningDialogueId = next.openingDialogues.first?.id ?? ""
         }
+        next.lorebooks = next.lorebooks.map(Self.normalizedLorebookForSave)
         next.coverPosition = RoleCardCoverPosition(rawValue: next.coverPosition)?.rawValue ?? RoleCardCoverPosition.centerCenter.rawValue
         return next
+    }
+
+    static func cardBySelectingOpening(_ card: RoleCard, openingID: String) -> RoleCard {
+        var next = normalizedForSave(card)
+        if next.openingDialogues.contains(where: { $0.id == openingID }) {
+            next.activeOpeningDialogueId = openingID
+        }
+        return next
+    }
+
+    static func cardByAddingOpening(_ card: RoleCard) -> RoleCard {
+        var next = normalizedForSave(card)
+        let entry = OpeningDialogue(name: "開場 \(next.openingDialogues.count + 1)")
+        next.openingDialogues.append(entry)
+        next.activeOpeningDialogueId = entry.id
+        return next
+    }
+
+    static func openingTabTitle(_ opening: OpeningDialogue, index: Int) -> String {
+        let trimmed = opening.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "開場 \(index + 1)" : trimmed
+    }
+
+    static func normalizedLorebookForSave(_ entry: LorebookEntry) -> LorebookEntry {
+        var next = entry
+        next.keywords = parseLorebookTerms(next.keywords.joined(separator: ", "))
+        next.secondaryKeywords = parseLorebookTerms(next.secondaryKeywords.joined(separator: ", "))
+        next.probability = LorebookEntry.clampedProbability(next.probability)
+        return next
+    }
+
+    static func cardByAddingLorebook(_ card: RoleCard) -> RoleCard {
+        var next = normalizedForSave(card)
+        let entry = LorebookEntry()
+        next.lorebooks.append(entry)
+        return next
+    }
+
+    static func cardByDeletingLorebook(_ card: RoleCard, lorebookID: String) -> RoleCard {
+        var next = card
+        next.lorebooks.removeAll { $0.id == lorebookID }
+        return normalizedForSave(next)
+    }
+
+    static func cardByTogglingLorebookEnabled(_ card: RoleCard, lorebookID: String) -> RoleCard {
+        var next = card
+        if let index = next.lorebooks.firstIndex(where: { $0.id == lorebookID }) {
+            next.lorebooks[index].enabled.toggle()
+        }
+        return normalizedForSave(next)
+    }
+
+    static func lorebookSummaryTitle(_ entry: LorebookEntry, index: Int) -> String {
+        let title = entry.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let probability = LorebookEntry.clampedProbability(entry.probability)
+        let parts = [
+            title.isEmpty ? "條目 \(index + 1)" : title,
+            entry.permanent ? "永久" : "",
+            entry.secondaryKeywords.isEmpty ? "" : "第二關鍵字",
+            probability < 100 ? "\(probability)%" : "",
+            entry.enabled ? "" : "停用"
+        ].filter { !$0.isEmpty }
+        return parts.joined(separator: "｜")
+    }
+
+    static func parseLorebookTerms(_ value: String) -> [String] {
+        let separators = CharacterSet(charactersIn: "\n,，、;；|/／")
+        var seen = Set<String>()
+        return value.components(separatedBy: separators).compactMap { raw in
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let key = trimmed.lowercased()
+            guard seen.insert(key).inserted else { return nil }
+            return trimmed
+        }
     }
 
     static func dataURL(for imageData: Data, mimeType: String = "image/jpeg") -> String {
@@ -1722,12 +2020,60 @@ struct RoleCardEditorView: View {
         card.customSections.removeAll { $0.id == id }
     }
 
+    private func selectOpening(id: String) {
+        card = Self.cardBySelectingOpening(card, openingID: id)
+        selectedOpeningId = card.activeOpeningDialogueId
+    }
+
+    private func addOpening() {
+        card = Self.cardByAddingOpening(card)
+        selectedOpeningId = card.activeOpeningDialogueId
+    }
+
     private func deleteOpening(id: String) {
         card = Self.cardByDeletingOpening(card, openingID: id)
+        selectedOpeningId = card.activeOpeningDialogueId
+    }
+
+    private func addLorebook() {
+        card = Self.cardByAddingLorebook(card)
+        selectedLorebookId = card.lorebooks.last?.id
+    }
+
+    private func selectLorebook(id: String) {
+        guard card.lorebooks.contains(where: { $0.id == id }) else { return }
+        selectedLorebookId = id
+    }
+
+    private func toggleLorebookEnabled(id: String) {
+        card = Self.cardByTogglingLorebookEnabled(card, lorebookID: id)
+        ensureSelectedLorebookIsValid()
     }
 
     private func deleteLorebook(id: String) {
-        card.lorebooks.removeAll { $0.id == id }
+        let deletedIndex = card.lorebooks.firstIndex { $0.id == id } ?? 0
+        card = Self.cardByDeletingLorebook(card, lorebookID: id)
+        if card.lorebooks.isEmpty {
+            selectedLorebookId = nil
+        } else if selectedLorebookId == id || !card.lorebooks.contains(where: { $0.id == selectedLorebookId }) {
+            let fallbackIndex = min(max(0, deletedIndex - 1), card.lorebooks.count - 1)
+            selectedLorebookId = card.lorebooks[fallbackIndex].id
+        }
+    }
+
+    private func ensureSelectedOpeningIsValid() {
+        card = Self.normalizedForSave(card)
+        if !card.openingDialogues.contains(where: { $0.id == selectedOpeningId }) {
+            selectedOpeningId = card.activeOpeningDialogueId
+        }
+    }
+
+    private func ensureSelectedLorebookIsValid() {
+        if card.lorebooks.isEmpty {
+            selectedLorebookId = nil
+        } else if !card.lorebooks.contains(where: { $0.id == selectedLorebookId }) {
+            selectedLorebookId = card.lorebooks.first?.id
+        }
     }
 }
 
@@ -4122,18 +4468,8 @@ struct ModelContentView: View {
 
     static func visiblePromptModeIndices(state: AppState) -> [Int] {
         guard let roleCard = state.activeRoleCard else { return [] }
-        let promptModeID = roleCard.promptModeId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !promptModeID.isEmpty {
-            let idMatches = state.promptModes.indices.filter { state.promptModes[$0].id == promptModeID }
-            if !idMatches.isEmpty {
-                return Array(idMatches)
-            }
-        }
-        let roleMode = roleCard.mode.rawValue
-        let modeMatches = state.promptModes.indices.filter {
-            state.promptModes[$0].mode == roleMode || state.promptModes[$0].id == roleMode
-        }
-        return Array(modeMatches)
+        guard let index = state.promptModeIndex(for: roleCard) else { return [] }
+        return [index]
     }
 
     static func visiblePromptModeIDs(state: AppState) -> [String] {

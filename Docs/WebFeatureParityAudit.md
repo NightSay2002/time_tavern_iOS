@@ -43,7 +43,7 @@ Scope: compare non-Discord web functionality in `/Users/wingfungwong/Downloads/t
 | True API-backed compression calls | Complete | iOS calls DeepSeek for normal plain-text/JSON compression profiles and image Base Prompt profiles, merges normal results, clears image profile state, calls NovelAI, saves album images, appends model-image chat messages, and now follows web `before_reasoner` / `after_assistant` trigger timing with keyword-source and skip-reasoner behavior. |
 | Time tracking settings | Complete | Current day/date/period, auto period, keyword lists, keep-time directive, help text, detection tests. |
 | Defaults apply/save | Complete | Local defaults save/restore; fallback bundled web defaults; preserves sessions/logs/album/keys. |
-| ZIP import/export | Complete by removal | User requested removal; user-facing ZIP flow is absent. |
+| JSON import/export | Complete | User-facing import/export now uses standalone JSON flows; ZIP bundle flow is removed. |
 | Sessions save/load/delete | Complete | Archive tab supports save/load/delete. |
 | Sessions rename/archive/resume/detail preview | Complete | Added rename, archive, restore from archive, and preview. |
 | NovelAI status/balance | Complete | Native status button via `NovelAIClient.status`. |

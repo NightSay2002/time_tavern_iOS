@@ -480,10 +480,14 @@ private struct SillyTavernBookEntry: Decodable {
     var comment: String?
     var content: String?
     var keys: [String]?
+    var secondaryKeys: [String]?
     var enabled: Bool?
+    var constant: Bool?
+    var probability: Int?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, comment, content, keys, enabled
+        case id, name, comment, content, keys, enabled, constant, probability
+        case secondaryKeys = "secondary_keys"
     }
 
     init(from decoder: Decoder) throws {
@@ -497,7 +501,10 @@ private struct SillyTavernBookEntry: Decodable {
         comment = try container.decodeIfPresent(String.self, forKey: .comment)
         content = try container.decodeIfPresent(String.self, forKey: .content)
         keys = try container.decodeIfPresent([String].self, forKey: .keys) ?? []
+        secondaryKeys = try container.decodeIfPresent([String].self, forKey: .secondaryKeys) ?? []
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+        constant = try container.decodeIfPresent(Bool.self, forKey: .constant)
+        probability = try container.decodeIfPresent(Int.self, forKey: .probability)
     }
 
     var native: LorebookEntry {
@@ -505,8 +512,11 @@ private struct SillyTavernBookEntry: Decodable {
             id: id ?? UUID().uuidString,
             title: name ?? comment ?? "世界書",
             keywords: keys ?? [],
+            secondaryKeywords: secondaryKeys ?? [],
             content: content ?? "",
-            enabled: enabled ?? true
+            enabled: enabled ?? true,
+            permanent: constant ?? false,
+            probability: probability ?? 100
         )
     }
 }
@@ -706,7 +716,7 @@ private struct WebRoleCard: Decodable {
     var openingDialogue: String?
     var openingDialogues: [OpeningDialogue]?
     var activeOpeningDialogueId: String?
-    var lorebooks: [WebLorebookEntry]?
+    var lorebooks: [LorebookEntry]?
 
     var native: RoleCard {
         var card = RoleCard()
@@ -726,7 +736,7 @@ private struct WebRoleCard: Decodable {
             card.openingDialogues = [OpeningDialogue(content: openingDialogue ?? "")]
         }
         card.activeOpeningDialogueId = activeOpeningDialogueId ?? card.openingDialogues.first?.id ?? ""
-        card.lorebooks = (lorebooks ?? []).map(\.native)
+        card.lorebooks = lorebooks ?? []
         return card
     }
 
@@ -748,25 +758,6 @@ private struct WebRoleCard: Decodable {
         guard let dataURL, let commaIndex = dataURL.firstIndex(of: ",") else { return nil }
         let encoded = String(dataURL[dataURL.index(after: commaIndex)...])
         return Data(base64Encoded: encoded)
-    }
-}
-
-private struct WebLorebookEntry: Decodable {
-    var id: String?
-    var title: String?
-    var key: String?
-    var keywords: [String]?
-    var content: String?
-    var enabled: Bool?
-
-    var native: LorebookEntry {
-        LorebookEntry(
-            id: id ?? UUID().uuidString,
-            title: title ?? key ?? "世界書",
-            keywords: keywords ?? key.map { [$0] } ?? [],
-            content: content ?? "",
-            enabled: enabled ?? true
-        )
     }
 }
 

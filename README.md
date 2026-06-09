@@ -7,7 +7,7 @@ Standalone SwiftUI iOS app for Time Tavern.
 - Minimum iOS: 17.0
 - Architecture: single native app, direct DeepSeek and NovelAI API calls
 - Storage: SwiftData for local state, Keychain for API keys
-- Import/export: ZIP bundle support through ZIPFoundation
+- Import/export: standalone JSON flows for role cards, prompt modes, and presets
 
 Implemented native areas:
 
@@ -16,7 +16,7 @@ Implemented native areas:
 - Prompt Lab with modes, prompt rules, compression profiles, trigger actions, append terms, prompt preview.
 - Sessions archive with save/load/delete and branch backups before replay/regeneration.
 - NovelAI image studio with status test, image generation, and local album.
-- Settings for DeepSeek/NAI keys, model/base URLs, user profile, time tracking, ZIP import/export.
+- Settings for DeepSeek/NAI keys, model/base URLs, user profile, time tracking, JSON import/export, and defaults.
 
 Open `TimeTavern.xcodeproj` in Xcode or build with:
 

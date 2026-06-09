@@ -369,34 +369,188 @@ struct LorebookEntry: Codable, Identifiable, Hashable {
     var id: String = UUID().uuidString
     var title: String = ""
     var keywords: [String] = []
+    var secondaryKeywords: [String] = []
     var content: String = ""
     var enabled: Bool = true
+    var permanent: Bool = false
+    var probability: Int = 100
+    var expanded: Bool = false
     var insertedTurnNumbers: [Int] = []
 
     init(
         id: String = UUID().uuidString,
         title: String = "",
         keywords: [String] = [],
+        secondaryKeywords: [String] = [],
         content: String = "",
         enabled: Bool = true,
+        permanent: Bool = false,
+        probability: Int = 100,
+        expanded: Bool = false,
         insertedTurnNumbers: [Int] = []
     ) {
         self.id = id
         self.title = title
         self.keywords = keywords
+        self.secondaryKeywords = secondaryKeywords
         self.content = content
         self.enabled = enabled
+        self.permanent = permanent
+        self.probability = Self.clampedProbability(probability)
+        self.expanded = expanded
         self.insertedTurnNumbers = insertedTurnNumbers
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case key
+        case name
+        case comment
+        case chineseTitle = "標題"
+        case chineseName = "名稱"
+        case keywords
+        case keyword
+        case keys
+        case chineseKeywords = "關鍵字"
+        case simplifiedChineseKeywords = "关键词"
+        case secondaryKeywords
+        case secondaryKeyword
+        case secondaryKeys
+        case secondaryUnderscoreKeys = "secondary_keys"
+        case chineseSecondaryKeywords = "第二關鍵字"
+        case simplifiedChineseSecondaryKeywords = "第二关键词"
+        case content
+        case text
+        case chineseContent = "內容"
+        case enabled
+        case permanent
+        case constant
+        case alwaysActive
+        case alwaysActiveSnake = "always_active"
+        case probability
+        case expanded
+        case insertedTurnNumbers
+        case activation
+        case extensions
+    }
+
+    private struct LorebookActivation: Decodable {
+        var permanent: Bool?
+        var probability: Int?
+    }
+
+    private struct LorebookExtensions: Decodable {
+        var probability: Int?
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
-        title = try container.decodeIfPresent(String.self, forKey: .title) ?? ""
-        keywords = try container.decodeIfPresent([String].self, forKey: .keywords) ?? []
-        content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
+        content = try Self.firstDecodedString(in: container, keys: [.content, .text, .chineseContent]) ?? ""
+        keywords = Self.decodeTextList(in: container, keys: [.keywords, .keyword, .keys, .chineseKeywords, .simplifiedChineseKeywords])
+        secondaryKeywords = Self.decodeTextList(in: container, keys: [
+            .secondaryKeywords,
+            .secondaryKeyword,
+            .secondaryKeys,
+            .secondaryUnderscoreKeys,
+            .chineseSecondaryKeywords,
+            .simplifiedChineseSecondaryKeywords
+        ])
+        title = Self.firstNonEmpty([
+            try Self.firstDecodedString(in: container, keys: [.title, .key, .name, .comment, .chineseTitle, .chineseName]),
+            Self.firstMarkdownHeading(in: content),
+            keywords.first
+        ])
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        let activation = try container.decodeIfPresent(LorebookActivation.self, forKey: .activation)
+        let extensions = try container.decodeIfPresent(LorebookExtensions.self, forKey: .extensions)
+        permanent = try container.decodeIfPresent(Bool.self, forKey: .permanent) ??
+            container.decodeIfPresent(Bool.self, forKey: .constant) ??
+            container.decodeIfPresent(Bool.self, forKey: .alwaysActive) ??
+            container.decodeIfPresent(Bool.self, forKey: .alwaysActiveSnake) ??
+            activation?.permanent ??
+            false
+        let decodedProbability = try container.decodeIfPresent(Int.self, forKey: .probability) ??
+            activation?.probability ??
+            extensions?.probability ??
+            100
+        probability = Self.clampedProbability(decodedProbability)
+        expanded = try container.decodeIfPresent(Bool.self, forKey: .expanded) ?? false
         insertedTurnNumbers = try container.decodeIfPresent([Int].self, forKey: .insertedTurnNumbers) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(keywords, forKey: .keywords)
+        try container.encode(secondaryKeywords, forKey: .secondaryKeywords)
+        try container.encode(content, forKey: .content)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(permanent, forKey: .permanent)
+        try container.encode(Self.clampedProbability(probability), forKey: .probability)
+        try container.encode(expanded, forKey: .expanded)
+        try container.encode(insertedTurnNumbers, forKey: .insertedTurnNumbers)
+    }
+
+    static func clampedProbability(_ value: Int) -> Int {
+        min(100, max(0, value))
+    }
+
+    private static func firstDecodedString(in container: KeyedDecodingContainer<CodingKeys>, keys: [CodingKeys]) throws -> String? {
+        for key in keys {
+            if let value = try container.decodeIfPresent(String.self, forKey: key)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func decodeTextList(in container: KeyedDecodingContainer<CodingKeys>, keys: [CodingKeys]) -> [String] {
+        for key in keys {
+            if let array = try? container.decodeIfPresent([String].self, forKey: key) {
+                return dedupeTerms(array)
+            }
+            if let string = try? container.decodeIfPresent(String.self, forKey: key) {
+                return splitTerms(string)
+            }
+        }
+        return []
+    }
+
+    private static func splitTerms(_ value: String) -> [String] {
+        let separators = CharacterSet(charactersIn: "\n,，、;；|/／")
+        return dedupeTerms(value.components(separatedBy: separators))
+    }
+
+    private static func dedupeTerms(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.compactMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let key = trimmed.lowercased()
+            guard seen.insert(key).inserted else { return nil }
+            return trimmed
+        }
+    }
+
+    private static func firstMarkdownHeading(in text: String) -> String? {
+        text.components(separatedBy: .newlines)
+            .compactMap { line -> String? in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmed.hasPrefix("#") else { return nil }
+                let title = trimmed.drop(while: { $0 == "#" })
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return title.isEmpty ? nil : title
+            }
+            .first
+    }
+
+    private static func firstNonEmpty(_ values: [String?]) -> String {
+        values.compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? ""
     }
 }
 
@@ -419,7 +573,7 @@ struct RoleCard: Codable, Identifiable, Hashable {
         id: String = UUID().uuidString,
         name: String = "",
         mode: RoleCardMode = .multi,
-        promptModeId: String = "multi",
+        promptModeId: String? = nil,
         coverImageData: Data? = nil,
         coverImageDataURL: String = "",
         coverPosition: String = RoleCardCoverPosition.centerCenter.rawValue,
@@ -433,7 +587,7 @@ struct RoleCard: Codable, Identifiable, Hashable {
         self.id = id
         self.name = name
         self.mode = mode
-        self.promptModeId = promptModeId
+        self.promptModeId = promptModeId ?? mode.rawValue
         self.coverImageData = coverImageData
         self.coverImageDataURL = coverImageDataURL
         self.coverPosition = RoleCardCoverPosition(rawValue: coverPosition)?.rawValue ?? RoleCardCoverPosition.centerCenter.rawValue
@@ -1018,6 +1172,21 @@ struct PromptModeConfig: Codable, Identifiable, Hashable {
     }
 }
 
+struct ConversationTurnSnapshot: Codable, Hashable {
+    var promptModes: [PromptModeConfig] = []
+    var timeTracking: TimeTrackingConfig = TimeTrackingConfig()
+
+    init(promptModes: [PromptModeConfig] = [], timeTracking: TimeTrackingConfig = TimeTrackingConfig()) {
+        self.promptModes = promptModes
+        self.timeTracking = timeTracking
+    }
+
+    init(state: AppState) {
+        promptModes = state.promptModes
+        timeTracking = state.timeTracking
+    }
+}
+
 struct ConversationMessage: Codable, Identifiable, Hashable {
     var id: String = UUID().uuidString
     var role: MessageRole = .user
@@ -1027,6 +1196,9 @@ struct ConversationMessage: Codable, Identifiable, Hashable {
     var compressionNotice: Bool = false
     var autoTimeWarning: String = ""
     var feedback: String = ""
+    var streamingReasoningPreview: String = ""
+    var stateBeforeTurnSnapshot: ConversationTurnSnapshot?
+    var stateAfterTurnSnapshot: ConversationTurnSnapshot?
     var imageData: Data?
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
@@ -1040,6 +1212,9 @@ struct ConversationMessage: Codable, Identifiable, Hashable {
         compressionNotice: Bool = false,
         autoTimeWarning: String = "",
         feedback: String = "",
+        streamingReasoningPreview: String = "",
+        stateBeforeTurnSnapshot: ConversationTurnSnapshot? = nil,
+        stateAfterTurnSnapshot: ConversationTurnSnapshot? = nil,
         imageData: Data? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
@@ -1052,6 +1227,9 @@ struct ConversationMessage: Codable, Identifiable, Hashable {
         self.compressionNotice = compressionNotice
         self.autoTimeWarning = autoTimeWarning
         self.feedback = feedback
+        self.streamingReasoningPreview = streamingReasoningPreview
+        self.stateBeforeTurnSnapshot = stateBeforeTurnSnapshot
+        self.stateAfterTurnSnapshot = stateAfterTurnSnapshot
         self.imageData = imageData
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -1067,6 +1245,9 @@ struct ConversationMessage: Codable, Identifiable, Hashable {
         compressionNotice = try container.decodeIfPresent(Bool.self, forKey: .compressionNotice) ?? false
         autoTimeWarning = try container.decodeIfPresent(String.self, forKey: .autoTimeWarning) ?? ""
         feedback = try container.decodeIfPresent(String.self, forKey: .feedback) ?? ""
+        streamingReasoningPreview = try container.decodeIfPresent(String.self, forKey: .streamingReasoningPreview) ?? ""
+        stateBeforeTurnSnapshot = try container.decodeIfPresent(ConversationTurnSnapshot.self, forKey: .stateBeforeTurnSnapshot)
+        stateAfterTurnSnapshot = try container.decodeIfPresent(ConversationTurnSnapshot.self, forKey: .stateAfterTurnSnapshot)
         imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
@@ -1904,6 +2085,49 @@ struct AppState: Codable, Hashable {
 
     var activeAssistantCard: AssistantCard? {
         AssistantCard.card(for: activeAssistantMode)
+    }
+
+    func promptModeIndex(for roleCard: RoleCard) -> Int? {
+        let promptModeID = roleCard.promptModeId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !promptModeID.isEmpty,
+           let explicitIndex = promptModes.indices.first(where: { promptModes[$0].id == promptModeID }),
+           promptMode(promptModes[explicitIndex], isCompatibleWith: roleCard) {
+            return explicitIndex
+        }
+
+        let roleMode = roleCard.mode.rawValue
+        if let roleModeIndex = promptModes.indices.first(where: {
+            promptModes[$0].mode == roleMode || promptModes[$0].id == roleMode
+        }) {
+            return roleModeIndex
+        }
+
+        if !promptModeID.isEmpty,
+           let explicitIndex = promptModes.indices.first(where: { promptModes[$0].id == promptModeID }) {
+            return explicitIndex
+        }
+
+        return promptModes.indices.first { promptModes[$0].id == RoleCardMode.multi.rawValue }
+    }
+
+    func promptMode(for roleCard: RoleCard) -> PromptModeConfig? {
+        guard let index = promptModeIndex(for: roleCard) else { return nil }
+        return promptModes[index]
+    }
+
+    private func promptMode(_ promptMode: PromptModeConfig, isCompatibleWith roleCard: RoleCard) -> Bool {
+        let roleMode = roleCard.mode.rawValue
+        let promptModeID = promptMode.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let promptModeKind = promptMode.mode.trimmingCharacters(in: .whitespacesAndNewlines)
+        if promptModeID == roleMode || promptModeKind == roleMode {
+            return true
+        }
+        let builtInModes: Set<String> = [
+            RoleCardMode.single.rawValue,
+            RoleCardMode.multi.rawValue,
+            RoleCardMode.noRole.rawValue
+        ]
+        return !builtInModes.contains(promptModeID) && !builtInModes.contains(promptModeKind)
     }
 
     static func defaultPromptModes() -> [PromptModeConfig] {

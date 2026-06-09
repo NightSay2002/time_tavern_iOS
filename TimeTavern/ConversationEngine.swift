@@ -77,10 +77,11 @@ final class ConversationEngine {
         let promptMode = promptMode(for: roleCard, in: state)
         let userName = resolvedUserName(state)
         let roleName = roleCard.name
+        let latestUser = latestUserMessage(state: state, userInput: userInput)
         let systemPrompt = [
             "【主要規則】",
             renderTemplate(effectiveMainRules(promptMode), user: userName, role: roleName),
-            roleCardPromptContext(state: state, roleCard: roleCard),
+            roleCardPromptContext(state: state, roleCard: roleCard, latestUser: latestUser),
             "【輸出規則】",
             renderTemplate(effectiveContextRules(promptMode), user: userName, role: roleName),
             "【處理要求】",
@@ -123,7 +124,7 @@ final class ConversationEngine {
             [ChatAPIMessage(role: "user", content: currentUserModelContent(state: state, roleCard: nil, mode: nil, latestUser: latestUser, userInput: userInput))]
     }
 
-    private func roleCardPromptContext(state: AppState, roleCard: RoleCard) -> String {
+    private func roleCardPromptContext(state: AppState, roleCard: RoleCard, latestUser: ConversationMessage? = nil) -> String {
         let userName = resolvedUserName(state)
         let roleName = roleCard.name
         let title: String
@@ -148,12 +149,29 @@ final class ConversationEngine {
                 ].joined(separator: "\n")
             }
             .joined(separator: "\n\n")
+        let permanentLorebooks = roleCard.lorebooks
+            .filter { entry in
+                entry.enabled &&
+                    entry.permanent &&
+                    !entry.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                    passesLorebookProbability(entry, state: state, latestUser: latestUser)
+            }
+            .map { entry in
+                let key = lorebookKey(entry)
+                let renderedKey = renderTemplate(key.isEmpty ? "永久啟用" : key, user: userName, role: roleName)
+                let renderedContent = renderTemplate(entry.content, user: userName, role: roleName)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return renderedContent.isEmpty ? "" : "世界書-\(renderedKey):\(renderedContent)"
+            }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n")
         return [
             title,
             "使用者稱呼：\(userName)",
             "角色模式：\(roleCard.mode.title)",
             "角色卡名稱：\(renderTemplate(roleCard.name, user: userName, role: roleName))",
-            sections
+            sections,
+            permanentLorebooks
         ].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n")
     }
@@ -162,9 +180,7 @@ final class ConversationEngine {
         let summaries = mode.compressionProfiles
             .filter(\.enabled)
             .filter { !$0.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .map {
-                "【大模型內容：\(renderTemplate($0.name, user: user, role: role))】\n\(renderTemplate($0.summary, user: user, role: role))"
-            }
+            .compactMap { compressionProfileSummaryForReasoner(profile: $0, user: user, role: role) }
             .joined(separator: "\n\n")
         guard !summaries.isEmpty else { return "" }
         return [
@@ -176,6 +192,37 @@ final class ConversationEngine {
         ].joined(separator: "\n")
     }
 
+    private func compressionProfileSummaryForReasoner(profile: CompressionProfile, user: String, role: String) -> String? {
+        guard profile.modelKind != .image else { return nil }
+        let profileName = renderTemplate(profile.name.isEmpty ? profile.id : profile.name, user: user, role: role)
+        let models = compressionModels(for: profile)
+        guard profile.modelKind == .normal, !models.isEmpty else {
+            let summary = renderTemplate(profile.summary, user: user, role: role)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !summary.isEmpty else { return nil }
+            return "【大模型內容：\(profileName)】\n\(summary)"
+        }
+
+        let normalized = normalizedCompressionJSONState(profile.summary, models: models)
+        let modules = models.compactMap { model -> String? in
+            let id = model.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty else { return nil }
+            let items = (normalized.model[id] ?? [])
+                .map { renderTemplate($0, user: user, role: role).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            guard !items.isEmpty else { return nil }
+            let name = renderTemplate(model.name.isEmpty ? id : model.name, user: user, role: role)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (["【\(name.isEmpty ? id : name)】"] + items.map { "- \($0)" })
+                .joined(separator: "\n")
+        }
+        guard !modules.isEmpty else { return nil }
+        return [
+            "【大模型內容：\(profileName)】",
+            modules.joined(separator: "\n\n")
+        ].joined(separator: "\n")
+    }
+
     private func simpleCompressedContextMessages(
         state: AppState,
         roleCard: RoleCard,
@@ -184,19 +231,22 @@ final class ConversationEngine {
     ) -> [ChatAPIMessage] {
         let latestUser = latestUserMessage(state: state, userInput: userInput)
         let contextLimit = max(1, mode.dialogueContextRounds)
-        let compressedThroughTurnNumber = reasonerContextCutoffTurnNumber(mode: mode, latestUser: latestUser)
+        let contextBoundaryTurnNumber = dialogueContextBoundaryTurnNumber(mode: mode, latestUser: latestUser)
         let allRounds = completedDialogueRoundsBeforeLatestUser(state: state, latestUser: latestUser)
         let recentRounds = allRounds
-            .filter { roundTurnNumber($0) > compressedThroughTurnNumber }
+            .filter { roundTurnNumber($0) > contextBoundaryTurnNumber }
             .suffix(contextLimit)
         var contextMessages = recentRounds.flatMap { $0 }
 
         if !contextMessages.contains(where: { $0.role == .assistant }),
-           let bridgeRound = allRounds.last(where: { $0.contains(where: { $0.role == .assistant }) }) {
+           let bridgeRound = allRounds.last(where: {
+               roundTurnNumber($0) <= contextBoundaryTurnNumber &&
+                   $0.contains(where: { $0.role == .assistant })
+           }) {
             contextMessages.insert(contentsOf: bridgeRound, at: 0)
         }
 
-        if compressedThroughTurnNumber <= 0,
+        if contextBoundaryTurnNumber <= 0,
            let opening = openingDialogueContextMessage(state: state, roleCard: roleCard),
            !contextMessages.contains(where: { $0.content == opening.content }) {
             contextMessages.insert(opening, at: 0)
@@ -265,7 +315,7 @@ final class ConversationEngine {
         round.first { $0.role == .user }?.turnNumber ?? 0
     }
 
-    private func reasonerContextCutoffTurnNumber(mode: PromptModeConfig, latestUser: ConversationMessage) -> Int {
+    private func dialogueContextBoundaryTurnNumber(mode: PromptModeConfig, latestUser: ConversationMessage) -> Int {
         let contextLimit = max(1, mode.dialogueContextRounds)
         let latestTurn = max(0, latestUser.turnNumber)
         guard latestTurn > contextLimit else { return 0 }
@@ -318,7 +368,7 @@ final class ConversationEngine {
         let appendTerms = activeModelAppendTerms(mode: mode, state: state, roleName: roleName)
         let lorebooks = roleCard.map {
             formatLorebooks(
-                matchedLorebooks(roleCard: $0, state: state, conversation: state.conversation, userInput: base),
+                matchedLorebooks(roleCard: $0, state: state, conversation: state.conversation, latestUser: latestUser, userInput: base),
                 user: userName,
                 role: roleName
             )
@@ -348,11 +398,11 @@ final class ConversationEngine {
 
     private func formatLorebooks(_ entries: [LorebookEntry], user: String, role: String) -> String {
         let content = entries
-            .map { entry in
-                [
-                    entry.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        ? "【世界書】"
-                        : "【世界書：\(renderTemplate(entry.title, user: user, role: role))】",
+            .enumerated()
+            .map { index, entry in
+                let key = lorebookKey(entry)
+                return [
+                    "\(index + 1). \(renderTemplate(key.isEmpty ? "世界書" : key, user: user, role: role))",
                     renderTemplate(entry.content, user: user, role: role)
                 ].joined(separator: "\n")
             }
@@ -491,6 +541,28 @@ final class ConversationEngine {
         }
     }
 
+    func rollbackCompressionProgressForReplay(state: AppState, replayTurnNumber: Int) -> [PromptModeConfig] {
+        let replayTurn = max(1, replayTurnNumber)
+        return state.promptModes.map { mode in
+            var nextMode = mode
+            nextMode.compressionProfiles = mode.compressionProfiles.map { profile in
+                guard profile.compressedThroughTurnNumber >= replayTurn else { return profile }
+                var nextProfile = profile
+                nextProfile.compressedThroughTurnNumber = previousCompressionBoundary(
+                    profile: profile,
+                    mode: mode,
+                    beforeTurn: replayTurn
+                )
+                if nextProfile.compressedThroughTurnNumber < profile.compressedThroughTurnNumber {
+                    nextProfile.summary = ""
+                    nextProfile.updatedAt = Date()
+                }
+                return nextProfile
+            }
+            return nextMode
+        }
+    }
+
     func applyCompressionCompletion(
         state: AppState,
         request: CompressionAPIRequest,
@@ -501,6 +573,7 @@ final class ConversationEngine {
             var nextMode = mode
             nextMode.compressionProfiles = mode.compressionProfiles.map { profile in
                 guard profile.id == request.profileID else { return profile }
+                guard compressionCompletionValidationError(profile: profile, completion: completion) == nil else { return profile }
                 var nextProfile = profile
                 nextProfile.summary = mergeCompressionSummary(
                     currentSummary: request.previousSummary,
@@ -513,6 +586,45 @@ final class ConversationEngine {
             }
             return nextMode
         }
+    }
+
+    func compressionCompletionValidationError(
+        state: AppState,
+        request: CompressionAPIRequest,
+        completion: String
+    ) -> String? {
+        guard let profile = state.promptModes
+            .first(where: { $0.id == request.modeID })?
+            .compressionProfiles
+            .first(where: { $0.id == request.profileID })
+        else {
+            return "找不到大模型設定，無法驗證輸出格式。"
+        }
+        return compressionCompletionValidationError(profile: profile, completion: completion)
+    }
+
+    func compressionCompletionValidationError(profile: CompressionProfile, completion: String) -> String? {
+        let models = compressionModels(for: profile)
+        guard profile.modelKind == .normal, !models.isEmpty else { return nil }
+        let ids = models.map(\.id).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !ids.isEmpty else { return nil }
+        guard let object = strictJSONObject(completion) else {
+            return "請只輸出一個合法 JSON 物件，不能有 Markdown、說明文字或尾逗號。"
+        }
+        guard let model = object["model"] as? [String: Any],
+              let delete = object["delete"] as? [String: Any]
+        else {
+            return "JSON 必須使用頂層 model / delete，不可使用每個模塊各自 add/delete 的格式。"
+        }
+        for id in ids {
+            guard model.keys.contains(id), delete.keys.contains(id) else {
+                return "JSON 缺少 model.\(id) 或 delete.\(id) 欄位。"
+            }
+            guard model[id] is [Any], delete[id] is [Any] else {
+                return "model.\(id) 和 delete.\(id) 必須是陣列。"
+            }
+        }
+        return nil
     }
 
     func applyImageCompressionStarted(state: AppState, request: CompressionImageRequest) -> [PromptModeConfig] {
@@ -545,7 +657,7 @@ final class ConversationEngine {
 
     private func compressionPromptPreview(mode: PromptModeConfig, profile: CompressionProfile, user: String, role: String) -> String {
         let context = profile.contextCompression.mainRules.isEmpty ? profile.mainRules : profile.contextCompression.mainRules
-        let modelList = profile.contextCompression.models.isEmpty ? profile.models : profile.contextCompression.models
+        let modelList = compressionModels(for: profile)
         let outputRules: String
         if profile.modelKind == .image {
             outputRules = [
@@ -556,37 +668,78 @@ final class ConversationEngine {
             outputRules = [
                 "普通大模型輸出規則",
                 "直接輸出更新後的完整壓縮文本，禁止輸出 JSON。",
-                "請把目前模型內容與本次上下文合併成可供正文長期承接的純文本。"
+                "請把目前模型內容與本次上下文合併成可供正文長期承接的純文本。",
+                "如果舊內容已被新資訊取代、完成或失效，請在輸出的完整文本中自然移除或改寫。"
             ].joined(separator: "\n")
         } else {
-            let fields = modelList.map(\.id).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             outputRules = [
                 "普通大模型輸出規則",
-                "只能輸出一個合法 JSON 物件。",
-                "每個模塊會輸出 model.ID 與 delete.ID；AI 新輸出會追加合併，不會覆蓋既有模型內容。",
-                fields.isEmpty ? "" : "JSON 欄位：\(fields.joined(separator: ", "))"
-            ].filter { !$0.isEmpty }.joined(separator: "\n")
+                "只能輸出一個合法 JSON 物件，禁止輸出 JSON 以外的任何文字。",
+                "所有模型欄位都必須存在；沒有新增或刪除內容時輸出空陣列。",
+                "model.<id> 只放本次需要新增保存的內容；delete.<id> 只放已失效、已完成、被新版取代或重複的舊內容。",
+                "不可把本次剛新增到 model.<id> 的內容又放進 delete.<id>。",
+                "後端會把 model.<id> 追加到既有模型內容，不會整體覆蓋；請避免重複輸出既有內容。",
+                "JSON 格式範例:",
+                compressionJSONOutputShape(models: modelList)
+            ].joined(separator: "\n")
         }
         let models = modelList
-            .map { model in
+            .enumerated()
+            .map { index, model in
                 """
-                [\(renderTemplate(model.id, user: user, role: role))] \(renderTemplate(model.name, user: user, role: role))
-                add: \(renderTemplate(model.addRules, user: user, role: role))
-                delete: \(renderTemplate(model.deleteRules, user: user, role: role))
+                【模塊 \(index + 1): \(renderTemplate(model.name.isEmpty ? model.id : model.name, user: user, role: role))】
+                id:\(model.id)
+                新增模塊規則:
+                \(renderTemplate(model.addRules, user: user, role: role).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "無" : renderTemplate(model.addRules, user: user, role: role))
+                刪除模塊規則:
+                \(renderTemplate(model.deleteRules, user: user, role: role).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "無" : renderTemplate(model.deleteRules, user: user, role: role))
+                輸出欄位:model.\(model.id)
+                刪除欄位:delete.\(model.id)
                 """
             }
             .joined(separator: "\n\n")
-        return [
-            "模式：\(renderTemplate(mode.name, user: user, role: role))",
-            "壓縮 Profile：\(renderTemplate(profile.name, user: user, role: role))",
-            "類型：\(profile.modelKind.title)",
-            "範圍：\(profile.contextScope.title)",
-            outputRules,
-            renderTemplate(context, user: user, role: role),
-            models
-        ]
+        let sectionedPrompt: [String]
+        if profile.modelKind == .normal, !modelList.isEmpty {
+            sectionedPrompt = [
+                "【模型主要規則】",
+                renderTemplate(context, user: user, role: role),
+                "【模塊規則】",
+                models,
+                "【輸出規則】",
+                outputRules
+            ]
+        } else {
+            sectionedPrompt = [
+                "模式：\(renderTemplate(mode.name, user: user, role: role))",
+                "壓縮 Profile：\(renderTemplate(profile.name, user: user, role: role))",
+                "類型：\(profile.modelKind.title)",
+                "範圍：\(profile.contextScope.title)",
+                outputRules,
+                renderTemplate(context, user: user, role: role),
+                models
+            ]
+        }
+        return sectionedPrompt
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n\n---\n\n")
+    }
+
+    private func compressionJSONOutputShape(models: [CompressionModel]) -> String {
+        let ids = models.map(\.id).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let object: [String: Any] = [
+            "model": Dictionary(uniqueKeysWithValues: ids.map { ($0, [String]()) }),
+            "delete": Dictionary(uniqueKeysWithValues: ids.map { ($0, [String]()) })
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+              let json = String(data: data, encoding: .utf8)
+        else {
+            return #"{"model":{},"delete":{}}"#
+        }
+        return json
+    }
+
+    private func compressionModels(for profile: CompressionProfile) -> [CompressionModel] {
+        profile.contextCompression.models.isEmpty ? profile.models : profile.contextCompression.models
     }
 
     func effectiveCompressionTriggerActions(profile: CompressionProfile) -> [CompressionTriggerAction] {
@@ -765,6 +918,43 @@ final class ConversationEngine {
         return "both"
     }
 
+    private func previousCompressionBoundary(profile: CompressionProfile, mode: PromptModeConfig, beforeTurn replayTurn: Int) -> Int {
+        let interval = max(1, mode.dialogueContextRounds)
+        let actions = effectiveCompressionTriggerActions(profile: profile)
+        var boundaries = Set<Int>()
+        for action in actions where action.enabled {
+            let triggers = resolvedTriggerConfig(action: action, profile: profile)
+            if triggers.everyTurn, replayTurn > 1 {
+                boundaries.insert(replayTurn - 1)
+            }
+            if let targetTurn = action.turn, targetTurn > 0, targetTurn < replayTurn {
+                boundaries.insert(targetTurn)
+            }
+            for rawTurn in triggers.turns {
+                let normalizedTurn = max(0, rawTurn)
+                if normalizedTurn == 0 {
+                    let target = ((replayTurn - 1) / interval) * interval
+                    if target > 0 {
+                        boundaries.insert(target)
+                    }
+                    continue
+                }
+                var target = normalizedTurn
+                while target < replayTurn {
+                    boundaries.insert(target)
+                    target += interval
+                }
+            }
+            if triggers.roundLimit {
+                let target = ((replayTurn - 1) / interval) * interval
+                if target > 0 {
+                    boundaries.insert(target)
+                }
+            }
+        }
+        return boundaries.max() ?? 0
+    }
+
     private func compressionAPIMessages(state: AppState, mode: PromptModeConfig, profile: CompressionProfile) -> [ChatAPIMessage] {
         let roleName = state.activeRoleCard?.name ?? ""
         let userName = resolvedUserName(state)
@@ -848,9 +1038,7 @@ final class ConversationEngine {
         let effectiveIDs = ids.isEmpty ? ["Summary"] : ids
         var model = Dictionary(uniqueKeysWithValues: effectiveIDs.map { ($0, [String]()) })
         var delete = Dictionary(uniqueKeysWithValues: effectiveIDs.map { ($0, [String]()) })
-        guard let data = text.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
+        guard let object = parseJSONObject(text) else {
             let legacy = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !legacy.isEmpty, legacy != "無" {
                 model[effectiveIDs[0]] = [legacy]
@@ -884,14 +1072,9 @@ final class ConversationEngine {
             .map { $0.id.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         let ids = modelIDs.isEmpty ? ["Summary"] : modelIDs
-        var modelPayload = Dictionary(uniqueKeysWithValues: ids.map { ($0, [String]()) })
-        var deletePayload = Dictionary(uniqueKeysWithValues: ids.map { ($0, [String]()) })
-
-        if let data = existing.data(using: .utf8),
-           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            mergeJSONSection(object["model"], into: &modelPayload)
-            mergeJSONSection(object["delete"], into: &deletePayload)
-        }
+        let normalizedExisting = normalizedCompressionJSONState(existing, models: models)
+        var modelPayload = normalizedExisting.model
+        let deletePayload = normalizedExisting.delete
 
         modelPayload[ids[0], default: []].append(addition)
         let object: [String: Any] = [
@@ -910,12 +1093,71 @@ final class ConversationEngine {
         guard let section = value as? [String: Any] else { return }
         for (key, value) in section {
             guard target[key] != nil else { continue }
-            if let strings = value as? [String] {
-                target[key, default: []].append(contentsOf: strings)
-            } else if let values = value as? [Any] {
-                target[key, default: []].append(contentsOf: values.map { "\($0)" })
-            }
+            appendJSONValues(value, into: &target[key, default: []])
         }
+    }
+
+    private func appendJSONValues(_ value: Any?, into target: inout [String]) {
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { target.append(trimmed) }
+            return
+        }
+        if let values = value as? [Any] {
+            target.append(contentsOf: values.compactMap(normalizedJSONValueText))
+            return
+        }
+        if let value, let text = normalizedJSONValueText(value) {
+            target.append(text)
+        }
+    }
+
+    private func normalizedJSONValueText(_ value: Any) -> String? {
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if JSONSerialization.isValidJSONObject(value),
+           let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+           let json = String(data: data, encoding: .utf8) {
+            return json
+        }
+        let text = "\(value)".trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    private func parseJSONObject(_ text: String) -> [String: Any]? {
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return nil }
+        if let object = decodeJSONObject(raw) {
+            return object
+        }
+        if let range = raw.range(of: #"\{[\s\S]*\}"#, options: .regularExpression) {
+            return decodeJSONObject(String(raw[range]))
+        }
+        return nil
+    }
+
+    private func strictJSONObject(_ text: String) -> [String: Any]? {
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = raw.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object
+    }
+
+    private func decodeJSONObject(_ text: String) -> [String: Any]? {
+        let candidates = [
+            text,
+            text.replacingOccurrences(of: #",\s*([\}\]])"#, with: "$1", options: .regularExpression)
+        ]
+        for candidate in candidates {
+            guard let data = candidate.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            return object
+        }
+        return nil
     }
 
     func branchSession(from state: AppState, name: String) -> SavedSession {
@@ -971,13 +1213,18 @@ final class ConversationEngine {
     }
 
     private func promptMode(for roleCard: RoleCard, in state: AppState) -> PromptModeConfig {
-        state.promptModes.first { $0.id == roleCard.promptModeId } ??
-            state.promptModes.first { $0.mode == roleCard.mode.rawValue } ??
+        state.promptMode(for: roleCard) ??
             state.promptModes.first { $0.id == "multi" } ??
             PromptModeConfig()
     }
 
-    private func matchedLorebooks(roleCard: RoleCard, state: AppState, conversation: [ConversationMessage], userInput: String) -> [LorebookEntry] {
+    private func matchedLorebooks(
+        roleCard: RoleCard,
+        state: AppState,
+        conversation: [ConversationMessage],
+        latestUser: ConversationMessage,
+        userInput: String
+    ) -> [LorebookEntry] {
         let previousAssistant = conversation.last(where: { message in
             message.role == .assistant && !isModelInvisible(message)
         })?.content ?? ""
@@ -986,13 +1233,63 @@ final class ConversationEngine {
         let roleName = roleCard.name
         return roleCard.lorebooks.filter { entry in
             guard entry.enabled else { return false }
-            return entry.keywords.contains { keyword in
-                let normalized = renderTemplate(keyword, user: userName, role: roleName)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased()
-                return !normalized.isEmpty && target.contains(normalized)
+            guard !entry.permanent else { return false }
+            guard !entry.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+            guard lorebookKeywordList(entry.keywords, matches: target, user: userName, role: roleName) else {
+                return false
             }
+            let secondaryKeywords = entry.secondaryKeywords
+            if !secondaryKeywords.isEmpty,
+               !lorebookKeywordList(secondaryKeywords, matches: target, user: userName, role: roleName) {
+                return false
+            }
+            return passesLorebookProbability(entry, state: state, latestUser: latestUser)
         }
+    }
+
+    private func lorebookKey(_ entry: LorebookEntry) -> String {
+        let title = entry.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty {
+            return title
+        }
+        return entry.keywords.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private func lorebookKeywordList(_ keywords: [String], matches text: String, user: String, role: String) -> Bool {
+        keywords.contains { keyword in
+            let normalized = renderTemplate(keyword, user: user, role: role)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            return !normalized.isEmpty && text.contains(normalized)
+        }
+    }
+
+    private func passesLorebookProbability(_ entry: LorebookEntry, state: AppState, latestUser: ConversationMessage?) -> Bool {
+        let probability = LorebookEntry.clampedProbability(entry.probability)
+        if probability >= 100 {
+            return true
+        }
+        if probability <= 0 {
+            return false
+        }
+        let seed = [
+            entry.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? lorebookKey(entry) : entry.id,
+            String(latestUser?.turnNumber ?? 0),
+            latestUser?.id ?? "",
+            String((latestUser?.content ?? "").prefix(120))
+        ]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "|")
+        return hashStringToPercent(seed) < probability
+    }
+
+    private func hashStringToPercent(_ value: String) -> Int {
+        var hash: UInt32 = 2_166_136_261
+        for scalar in value.unicodeScalars {
+            hash ^= UInt32(scalar.value)
+            hash = hash &* 16_777_619
+        }
+        return Int(hash % 100)
     }
 
     private func keywordExpression(_ expression: String, matches text: String) -> Bool {

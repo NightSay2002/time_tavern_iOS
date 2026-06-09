@@ -2,6 +2,75 @@ import Foundation
 import SwiftData
 
 @MainActor
+private final class StreamingAssistantMessageUpdater {
+    private weak var store: TimeTavernStore?
+    private let assistantID: String
+    private var contentBuffer = ""
+    private var reasoningBuffer = ""
+    private var didStartContent = false
+    private var flushTask: Task<Void, Never>?
+
+    init(store: TimeTavernStore, assistantID: String) {
+        self.store = store
+        self.assistantID = assistantID
+    }
+
+    func receive(_ delta: ChatStreamDelta) {
+        switch delta.kind {
+        case .reasoning:
+            guard !didStartContent else { return }
+            reasoningBuffer += delta.text
+            scheduleFlush()
+        case .content:
+            let isFirstContent = !didStartContent
+            didStartContent = true
+            reasoningBuffer = ""
+            contentBuffer += delta.text
+            if isFirstContent {
+                flush()
+            } else {
+                scheduleFlush()
+            }
+        }
+    }
+
+    func finish(content: String) {
+        flushTask?.cancel()
+        flushTask = nil
+        contentBuffer = content
+        didStartContent = true
+        reasoningBuffer = ""
+        flush()
+    }
+
+    private func scheduleFlush() {
+        guard flushTask == nil else { return }
+        flushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: TimeTavernStore.streamingUIFlushIntervalNanoseconds)
+            self?.flush()
+        }
+    }
+
+    private func flush() {
+        flushTask?.cancel()
+        flushTask = nil
+        if didStartContent {
+            store?.updateStreamingAssistantMessage(
+                assistantID: assistantID,
+                content: contentBuffer,
+                reasoningPreview: ""
+            )
+        } else {
+            store?.updateStreamingAssistantMessage(
+                assistantID: assistantID,
+                content: nil,
+                reasoningPreview: reasoningBuffer
+            )
+        }
+    }
+}
+
+@MainActor
 final class TimeTavernStore: ObservableObject {
     @Published var state = AppState()
     @Published var deepSeekKey = ""
@@ -24,11 +93,18 @@ final class TimeTavernStore: ObservableObject {
     private var generationTask: Task<Void, Never>?
     private var novelAIGenerationTask: Task<Void, Never>?
     private var deepSeekChatKeyCursor = 0
+    static let compressionJSONMaxAttempts = 2
+    static let streamingUIFlushIntervalNanoseconds: UInt64 = 60_000_000
 
     private struct CompressionPhaseResult {
         var completed: Int = 0
         var skipReasoner: Bool = false
         var skipRequests: [CompressionAPIRequest] = []
+        var warning: String = ""
+    }
+
+    nonisolated static func shouldMarkCompressionNotice(completedProfileIDs: [String]) -> Bool {
+        completedProfileIDs.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == "standard" }
     }
 
     func attach(modelContext: ModelContext) {
@@ -213,13 +289,25 @@ final class TimeTavernStore: ObservableObject {
             statusText = uiStatic("生成中，請先停止目前回覆。")
             return
         }
+        let userTurn = state.conversation.filter { $0.role == .user }.count + 1
+        let userMessage = ConversationMessage(
+            role: .user,
+            content: text,
+            turnNumber: userTurn,
+            stateBeforeTurnSnapshot: captureNarrativeSnapshot()
+        )
+        state.conversation.append(userMessage)
+        startAssistantGeneration(for: userMessage, updateTimeTrackingFromUser: true)
+    }
+
+    private func startAssistantGeneration(for userMessage: ConversationMessage, updateTimeTrackingFromUser: Bool) {
         generationTask?.cancel()
         isGenerating = true
-        let userTurn = state.conversation.filter { $0.role == .user }.count + 1
-        let userMessage = ConversationMessage(role: .user, content: text, turnNumber: userTurn)
-        var assistantMessage = ConversationMessage(role: .assistant, content: "", turnNumber: userTurn)
-        state.conversation.append(userMessage)
-        conversationEngine.updateTimeTrackingFromUserMessage(state: &state, text: text)
+        let text = userMessage.content
+        var assistantMessage = ConversationMessage(role: .assistant, content: "", turnNumber: userMessage.turnNumber)
+        if updateTimeTrackingFromUser {
+            conversationEngine.updateTimeTrackingFromUserMessage(state: &state, text: text)
+        }
         state.conversation.append(assistantMessage)
         let assistantID = assistantMessage.id
         let apiKey = nextDeepSeekChatKey()
@@ -238,6 +326,7 @@ final class TimeTavernStore: ObservableObject {
                     let completionText = ConversationEngine.modelProcessingCompletionMessage(for: beforeCompression.skipRequests)
                     if let index = state.conversation.firstIndex(where: { $0.id == assistantID }) {
                         state.conversation[index].content = completionText
+                        state.conversation[index].stateAfterTurnSnapshot = captureNarrativeSnapshot()
                         assistantMessage = state.conversation[index]
                     }
                     state.aiLogs.insert(AILogEntry(
@@ -258,18 +347,20 @@ final class TimeTavernStore: ObservableObject {
 
                 let messages = try conversationEngine.buildPromptMessages(state: state, userInput: text)
                 requestMessages = messages
+                let streamUpdater = StreamingAssistantMessageUpdater(store: self, assistantID: assistantID)
                 let result = try await deepSeekClient.streamCompletion(
                     apiKey: apiKey,
                     settings: state.apiSettings,
                     messages: messages
                 ) { delta in
                     Task { @MainActor in
-                        guard let index = self.state.conversation.firstIndex(where: { $0.id == assistantID }) else { return }
-                        self.state.conversation[index].content += delta
+                        streamUpdater.receive(delta)
                     }
                 }
+                streamUpdater.finish(content: result.content)
                 if let index = state.conversation.firstIndex(where: { $0.id == assistantID }) {
                     state.conversation[index].content = result.content
+                    state.conversation[index].streamingReasoningPreview = ""
                     assistantMessage = state.conversation[index]
                 }
                 let autoTimeWarning = conversationEngine.updateTimeTrackingAfterAssistantTurn(
@@ -291,19 +382,28 @@ final class TimeTavernStore: ObservableObject {
                     debugReasoningContent: result.reasoningContent,
                     usage: result.usage
                 ), at: 0)
-                await applyCompressionForTurn(
+                let afterCompression = await applyCompressionForTurn(
                     latestUserInput: text,
                     latestAssistantText: result.content,
                     phase: .afterAssistant,
                     assistantID: assistantID
                 )
+                if let index = state.conversation.firstIndex(where: { $0.id == assistantID }) {
+                    state.conversation[index].stateAfterTurnSnapshot = captureNarrativeSnapshot()
+                    assistantMessage = state.conversation[index]
+                }
                 trimRuntimeLimits()
-                statusText = "生成完成。"
+                let compressionWarning = afterCompression.warning.isEmpty ? beforeCompression.warning : afterCompression.warning
+                statusText = compressionWarning.isEmpty ? "生成完成。" : compressionWarning
             } catch is CancellationError {
                 statusText = "生成已取消。"
+                if let index = state.conversation.firstIndex(where: { $0.id == assistantID }) {
+                    state.conversation[index].streamingReasoningPreview = ""
+                }
             } catch {
                 if let index = state.conversation.firstIndex(where: { $0.id == assistantID }) {
                     state.conversation[index].content = error.localizedDescription
+                    state.conversation[index].streamingReasoningPreview = ""
                 }
                 state.aiLogs.insert(AILogEntry(
                     purpose: chatPurpose,
@@ -320,6 +420,21 @@ final class TimeTavernStore: ObservableObject {
             isGenerating = false
             persist()
         }
+    }
+
+    fileprivate func updateStreamingAssistantMessage(
+        assistantID: String,
+        content: String?,
+        reasoningPreview: String?
+    ) {
+        guard let index = state.conversation.firstIndex(where: { $0.id == assistantID }) else { return }
+        if let content {
+            state.conversation[index].content = content
+        }
+        if let reasoningPreview {
+            state.conversation[index].streamingReasoningPreview = reasoningPreview
+        }
+        state.conversation[index].updatedAt = Date()
     }
 
     @discardableResult
@@ -350,15 +465,13 @@ final class TimeTavernStore: ObservableObject {
         guard !requests.isEmpty || !imageRequests.isEmpty else { return CompressionPhaseResult() }
 
         var completed = 0
+        var completedProfileIDs: [String] = []
         var skipRequests: [CompressionAPIRequest] = []
+        var warning = ""
         for request in requests {
             do {
                 let key = currentDeepSeekKeySet().contextCompressionKey(profileIndex: request.profileIndex)
-                let result = try await deepSeekClient.complete(
-                    apiKey: key,
-                    settings: state.apiSettings,
-                    messages: request.messages
-                )
+                let result = try await completeValidatedCompressionRequest(request: request, apiKey: key)
                 state.promptModes = conversationEngine.applyCompressionCompletion(
                     state: state,
                     request: request,
@@ -375,10 +488,12 @@ final class TimeTavernStore: ObservableObject {
                     usage: result.usage
                 ), at: 0)
                 completed += 1
+                completedProfileIDs.append(request.profileID)
                 if request.skipReasoner {
                     skipRequests.append(request)
                 }
             } catch {
+                warning = error.localizedDescription
                 state.aiLogs.insert(AILogEntry(
                     purpose: compressionPurpose(profileID: request.profileID),
                     model: state.apiSettings.deepSeekModel,
@@ -452,19 +567,98 @@ final class TimeTavernStore: ObservableObject {
                 ), at: 0)
             }
         }
-        if completed > 0, let index = state.conversation.firstIndex(where: { $0.id == assistantID }) {
+        if Self.shouldMarkCompressionNotice(completedProfileIDs: completedProfileIDs),
+           let index = state.conversation.firstIndex(where: { $0.id == assistantID }) {
             state.conversation[index].compressionNotice = true
         }
         return CompressionPhaseResult(
             completed: completed,
             skipReasoner: !skipRequests.isEmpty,
-            skipRequests: skipRequests
+            skipRequests: skipRequests,
+            warning: warning
+        )
+    }
+
+    private func completeValidatedCompressionRequest(
+        request: CompressionAPIRequest,
+        apiKey: String
+    ) async throws -> ChatCompletionResult {
+        var lastValidationError = ""
+        var messages = request.messages
+        for attempt in 1...Self.compressionJSONMaxAttempts {
+            let result = try await deepSeekClient.complete(
+                apiKey: apiKey,
+                settings: state.apiSettings,
+                messages: messages
+            )
+            guard let validationError = conversationEngine.compressionCompletionValidationError(
+                state: state,
+                request: request,
+                completion: result.content
+            ) else {
+                return result
+            }
+            lastValidationError = validationError
+            if attempt < Self.compressionJSONMaxAttempts {
+                messages = request.messages + [compressionJSONRetryMessage(validationError: validationError)]
+                continue
+            }
+        }
+        throw TimeTavernError.network("大模型輸出 JSON 格式不正確，已重試一次仍失敗：\(lastValidationError)")
+    }
+
+    private func compressionJSONRetryMessage(validationError: String) -> ChatAPIMessage {
+        ChatAPIMessage(
+            role: "user",
+            content: """
+            上一次輸出格式錯誤：\(validationError)
+
+            請重新生成一次。只能輸出一個合法 JSON 物件，不要 Markdown，不要解釋文字，不要尾逗號。
+            必須使用頂層 model / delete：
+            {"model":{"模塊ID":["新增內容"]},"delete":{"模塊ID":["刪除內容"]}}
+
+            不可使用 {"WorldLore":{"add":[],"delete":[]}} 這種每個模塊各自 add/delete 的格式。
+            """
         )
     }
 
     func cancelGeneration() {
         generationTask?.cancel()
         isGenerating = false
+    }
+
+    private func captureNarrativeSnapshot() -> ConversationTurnSnapshot {
+        ConversationTurnSnapshot(state: state)
+    }
+
+    private func applyNarrativeSnapshot(_ snapshot: ConversationTurnSnapshot) {
+        state.promptModes = snapshot.promptModes
+        state.timeTracking = snapshot.timeTracking
+    }
+
+    private func restoreNarrativeStateForReplay(targetIndex: Int) {
+        guard state.conversation.indices.contains(targetIndex) else { return }
+        if let snapshot = state.conversation[targetIndex].stateBeforeTurnSnapshot {
+            applyNarrativeSnapshot(snapshot)
+            return
+        }
+        if targetIndex > 0 {
+            for index in stride(from: targetIndex - 1, through: 0, by: -1) {
+                if let snapshot = state.conversation[index].stateAfterTurnSnapshot {
+                    applyNarrativeSnapshot(snapshot)
+                    return
+                }
+                if let snapshot = state.conversation[index].stateBeforeTurnSnapshot {
+                    applyNarrativeSnapshot(snapshot)
+                    return
+                }
+            }
+        }
+        let replayTurn = state.conversation[targetIndex].turnNumber
+        state.promptModes = conversationEngine.rollbackCompressionProgressForReplay(
+            state: state,
+            replayTurnNumber: replayTurn
+        )
     }
 
     func regenerateLatestAssistant() {
@@ -475,10 +669,15 @@ final class TimeTavernStore: ObservableObject {
         guard let assistantIndex = state.conversation.lastIndex(where: { $0.role == .assistant }) else { return }
         let user = state.conversation[..<assistantIndex].last(where: { $0.role == .user })
         guard let user else { return }
+        guard let userIndex = state.conversation.firstIndex(where: { $0.id == user.id }) else { return }
         state.savedSessions.insert(conversationEngine.branchSession(from: state, name: "重跑前備份"), at: 0)
+        restoreNarrativeStateForReplay(targetIndex: userIndex)
+        if state.conversation[userIndex].stateBeforeTurnSnapshot == nil {
+            state.conversation[userIndex].stateBeforeTurnSnapshot = captureNarrativeSnapshot()
+        }
         state.conversation.removeSubrange(assistantIndex..<state.conversation.endIndex)
         persist()
-        send(user.content)
+        startAssistantGeneration(for: state.conversation[userIndex], updateTimeTrackingFromUser: true)
     }
 
     func replay(from message: ConversationMessage, with newContent: String) {
@@ -488,6 +687,7 @@ final class TimeTavernStore: ObservableObject {
         }
         guard let index = state.conversation.firstIndex(where: { $0.id == message.id }) else { return }
         state.savedSessions.insert(conversationEngine.branchSession(from: state, name: "分支前備份"), at: 0)
+        restoreNarrativeStateForReplay(targetIndex: index)
         state.conversation.removeSubrange(index..<state.conversation.endIndex)
         persist()
         send(newContent)
