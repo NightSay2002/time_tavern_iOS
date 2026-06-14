@@ -1,5 +1,7 @@
 import XCTest
 import UIKit
+import Compression
+import UniformTypeIdentifiers
 @testable import TimeTavern
 
 final class TimeTavernTests: XCTestCase {
@@ -69,6 +71,16 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertTrue(KeyboardDismissTapDelegate.isEditableTextInputView(child))
     }
 
+    func testSettingsImportButtonsUseSinglePresenterAndFullRowTapArea() {
+        XCTAssertTrue(SettingsView.usesSingleDocumentImporterForJSONImports)
+        XCTAssertTrue(SettingsView.importButtonsUseFullRowHitArea)
+        XCTAssertTrue(SettingsView.shouldShowImporter(afterStarting: .roleCard))
+        XCTAssertTrue(SettingsView.shouldShowImporter(afterStarting: .promptMode))
+
+        XCTAssertEqual(Set(SettingsImportTarget.roleCard.allowedContentTypes), Set([.json, .png, .jpeg]))
+        XCTAssertEqual(SettingsImportTarget.promptMode.allowedContentTypes, [.json])
+    }
+
     func testHeaderTopActionsDisableDuringGeneration() {
         XCTAssertTrue(ChatSceneHeader.isTopActionDisabled(isGenerating: true))
         XCTAssertFalse(ChatSceneHeader.isTopActionDisabled(isGenerating: false))
@@ -83,15 +95,89 @@ final class TimeTavernTests: XCTestCase {
     func testAssistantBubbleShowsReasoningUntilFinalContentStarts() {
         var message = ConversationMessage(role: .assistant, content: "", streamingReasoningPreview: "正在整理上下文。")
         XCTAssertEqual(MessageBubble.displayText(for: message), "正在整理上下文。")
+        XCTAssertTrue(MessageBubble.isShowingReasoningPreview(message))
         XCTAssertFalse(MessageBubble.displayText(for: message).contains("生成中"))
         XCTAssertEqual(MessageBubble.compressionNoticeText, "已壓縮上下文")
 
         message.content = "她把酒杯放回桌面。"
         XCTAssertEqual(MessageBubble.displayText(for: message), "她把酒杯放回桌面。")
+        XCTAssertFalse(MessageBubble.isShowingReasoningPreview(message))
 
         message.content = ""
         message.streamingReasoningPreview = ""
         XCTAssertEqual(MessageBubble.displayText(for: message), "")
+    }
+
+    func testMessageMarkupRendererSupportsMarkdownAndAssistantHTMLLikeWeb() {
+        XCTAssertTrue(MessageMarkupRenderer.supportsMarkdownAndHTML)
+        XCTAssertTrue(MessageMarkupRenderer.mirrorsWebMarkdownRendering)
+        XCTAssertTrue(MessageMarkupRenderer.allowsHTMLForAssistantMessages)
+        XCTAssertFalse(MessageMarkupRenderer.usesHTMLImporterForDisplay)
+        XCTAssertTrue(MessageMarkupRenderer.rendersUserMessagesAsPlainTextForSendStability)
+
+        let markdownHTML = MessageMarkupRenderer.renderedHTML(
+            for: """
+            # 標題
+
+            > 引用
+
+            - 條目
+
+            `code` **bold** [link](https://example.com)
+            """,
+            role: .assistant
+        )
+        XCTAssertTrue(markdownHTML.contains("<h1>標題</h1>"))
+        XCTAssertTrue(markdownHTML.contains("<blockquote>引用</blockquote>"))
+        XCTAssertTrue(markdownHTML.contains("<ul>"))
+        XCTAssertTrue(markdownHTML.contains("<code>code</code>"))
+        XCTAssertTrue(markdownHTML.contains("<strong>bold</strong>"))
+        XCTAssertTrue(markdownHTML.contains(#"<a href="https://example.com">link</a>"#))
+
+        let assistantHTML = MessageMarkupRenderer.renderedHTML(
+            for: #"<span onclick="evil()">可顯示</span><script>alert(1)</script>"#,
+            role: .assistant
+        )
+        XCTAssertTrue(assistantHTML.contains("<span>可顯示</span>"))
+        XCTAssertFalse(assistantHTML.contains("onclick"))
+        XCTAssertFalse(assistantHTML.contains("script"))
+        XCTAssertFalse(assistantHTML.contains("alert"))
+
+        let userHTML = MessageMarkupRenderer.renderedHTML(for: "<b>不要作為 HTML</b>", role: .user)
+        XCTAssertTrue(userHTML.contains("&lt;b&gt;不要作為 HTML&lt;/b&gt;"))
+        XCTAssertFalse(userHTML.contains("<b>不要作為 HTML</b>"))
+
+        let attributed = MessageMarkupRenderer.attributedString(for: markdownHTML, role: .assistant)
+        XCTAssertFalse(attributed.string.isEmpty)
+
+        let immediateUserAttributed = MessageMarkupRenderer.attributedString(for: "<b>普通送出</b>", role: .user)
+        XCTAssertEqual(immediateUserAttributed.string, "<b>普通送出</b>")
+    }
+
+    func testMessageMarkupRendererPreservesParagraphsAndCodeLineBreaks() {
+        let plainBreaks = MessageMarkupRenderer.attributedString(
+            for: "第一段\n第二行\n\n第三段",
+            role: .assistant
+        )
+        XCTAssertEqual(plainBreaks.string, "第一段\n第二行\n\n第三段")
+
+        let htmlBreaks = MessageMarkupRenderer.attributedString(
+            for: "<p>第一段<br>第二行</p><p>第三段</p>",
+            role: .assistant
+        )
+        XCTAssertTrue(htmlBreaks.string.contains("第一段\n第二行"))
+        XCTAssertTrue(htmlBreaks.string.contains("第二行\n\n第三段"))
+
+        let codeBlock = MessageMarkupRenderer.attributedString(
+            for: """
+            ```swift
+            let first = 1
+            let second = 2
+            ```
+            """,
+            role: .assistant
+        )
+        XCTAssertTrue(codeBlock.string.contains("let first = 1\nlet second = 2"))
     }
 
     func testModelContentShowsOnlyActiveRoleCardPromptMode() {
@@ -200,6 +286,15 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertTrue(TimeTavernStore.slashCommandHelpText.contains("/reload"))
     }
 
+    func testStreamingUIFlushesInHundredCharacterBatches() {
+        XCTAssertEqual(TimeTavernStore.streamingUIFlushCharacterThreshold, 100)
+        XCTAssertFalse(TimeTavernStore.shouldFlushStreamingUI(currentCharacterCount: 99, lastFlushedCharacterCount: 0))
+        XCTAssertTrue(TimeTavernStore.shouldFlushStreamingUI(currentCharacterCount: 100, lastFlushedCharacterCount: 0))
+        XCTAssertFalse(TimeTavernStore.shouldFlushStreamingUI(currentCharacterCount: 180, lastFlushedCharacterCount: 100))
+        XCTAssertTrue(TimeTavernStore.shouldFlushStreamingUI(currentCharacterCount: 200, lastFlushedCharacterCount: 100))
+        XCTAssertTrue(TimeTavernStore.shouldFlushStreamingUI(currentCharacterCount: 12, lastFlushedCharacterCount: 0, force: true))
+    }
+
     func testTriggerTurnListParsesWebStyleWhitespaceAndPunctuation() {
         XCTAssertEqual(TriggerActionEditorView.parseTurnList("5 10 15 20"), [5, 10, 15, 20])
         XCTAssertEqual(TriggerActionEditorView.parseTurnList("20, 5，10、15;20"), [5, 10, 15, 20])
@@ -300,9 +395,11 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertTrue(MessageRow.usesInlineActionButtons)
         XCTAssertTrue(MessageRow.removesLongPressContextMenu)
         XCTAssertTrue(MessageBubble.usesPartialTextSelectableView)
+        XCTAssertTrue(MessageBubble.usesWebInspiredMarkdownSurface)
         XCTAssertTrue(MessageBubble.generatedImagesOpenPreviewOnTap)
         XCTAssertTrue(GeneratedImagePreview.showsCloseButton)
         XCTAssertTrue(SelectableMessageText.supportsPartialTextSelection)
+        XCTAssertTrue(SelectableMessageText.supportsMarkdownAndHTMLRendering)
         XCTAssertFalse(SelectableMessageText.isEditable)
         XCTAssertTrue(MessageActionBar.usesEmojiFeedbackIcons)
         XCTAssertEqual(MessageActionBar.feedbackEmoji(for: "like"), "👍")
@@ -469,6 +566,8 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(AssistantCard.characterCardCreationAssistant.displayName, "建立卡助手")
         XCTAssertEqual(state.activeAssistantCard?.displayName, "建立卡助手")
         XCTAssertTrue(CharactersView.separatesRoleCardsAndAssistantCards)
+        XCTAssertTrue(CharactersView.exposesRoleCardDeleteAction)
+        XCTAssertTrue(CharactersView.confirmsRoleCardDeletion)
         XCTAssertTrue(messages.first?.content.contains("助手 prompt for 旅人 and 建立卡助手") == true)
         XCTAssertEqual(messages.last?.role, "user")
         XCTAssertEqual(messages.last?.content, "幫我建立角色卡")
@@ -486,6 +585,21 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(store.state.activeRoleCardId, "")
         XCTAssertEqual(store.state.activeAssistantMode, AssistantCard.characterCardCreationAssistantID)
         XCTAssertEqual(store.state.conversation, [])
+    }
+
+    @MainActor
+    func testDeleteActiveRoleCardClearsSelection() {
+        let store = TimeTavernStore()
+        store.state.roleCards = [
+            RoleCard(id: "role_1", name: "刪除目標"),
+            RoleCard(id: "role_2", name: "保留")
+        ]
+        store.state.activeRoleCardId = "role_1"
+
+        store.deleteRoleCards(at: IndexSet(integer: 0))
+
+        XCTAssertEqual(store.state.roleCards.map(\.id), ["role_2"])
+        XCTAssertEqual(store.state.activeRoleCardId, "")
     }
 
     @MainActor
@@ -573,6 +687,22 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(toggled.lorebooks.first { $0.id == "lore_2" }?.enabled, false)
         XCTAssertEqual(deleted.lorebooks.map(\.id), ["lore_2", added.lorebooks.last?.id].compactMap { $0 })
         XCTAssertEqual(RoleCardEditorView.lorebookSummaryTitle(card.lorebooks[1], index: 1), "月亮｜第二關鍵字")
+        XCTAssertTrue(RoleCardEditorView.lorebookEditorExpandsInline)
+        XCTAssertFalse(RoleCardEditorView.lorebookEditorUsesDetachedBottomPanel)
+        XCTAssertTrue(RoleCardEditorView.lorebookEditorUsesIDBasedBindings)
+        XCTAssertTrue(RoleCardEditorView.lorebookIsExpanded(entryID: "lore_2", selectedLorebookID: "lore_2"))
+        XCTAssertFalse(RoleCardEditorView.lorebookIsExpanded(entryID: "lore_1", selectedLorebookID: "lore_2"))
+
+        let editedAfterDelete = RoleCardEditorView.cardByUpdatingLorebook(deleted, lorebookID: "lore_2") { entry in
+            entry.content = "刪除其他條目後仍可安全編輯"
+        }
+        XCTAssertEqual(editedAfterDelete.lorebooks.first { $0.id == "lore_2" }?.content, "刪除其他條目後仍可安全編輯")
+
+        let unchanged = RoleCardEditorView.cardByUpdatingLorebook(editedAfterDelete, lorebookID: "lore_1") { entry in
+            entry.content = "不應寫入已刪除條目"
+        }
+        XCTAssertEqual(unchanged.lorebooks.map(\.id), editedAfterDelete.lorebooks.map(\.id))
+        XCTAssertFalse(unchanged.lorebooks.contains { $0.content == "不應寫入已刪除條目" })
     }
 
     func testLorebookEntryDecodesWebFieldsAndClampsProbability() throws {
@@ -2014,6 +2144,47 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(request.parameters.v4NegativePrompt.caption.charCaptions.first?.centers.first?.y, 0.75)
     }
 
+    func testNovelAIExtractsImagesFromZipResponseLikeWebGenerator() throws {
+        let png = Self.pngDataWithITXt(keyword: "NovelAIMetadata", value: "{}")
+        let zip = try Self.zipData(entries: [
+            (fileName: "image_1.png", data: png),
+            (fileName: "readme.txt", data: Data("skip".utf8))
+        ])
+
+        let items = try NovelAIClient.extractImages(
+            fromImageResponseData: zip,
+            prompt: "base prompt",
+            negativePrompt: "negative",
+            model: "nai-diffusion-4-5-full"
+        )
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.fileName, "image_1.png")
+        XCTAssertEqual(items.first?.mimeType, "image/png")
+        XCTAssertEqual(items.first?.prompt, "base prompt")
+        XCTAssertEqual(items.first?.negativePrompt, "negative")
+        XCTAssertEqual(items.first?.model, "nai-diffusion-4-5-full")
+        XCTAssertEqual(items.first?.imageData, png)
+    }
+
+    func testNovelAIExtractsImagesFromJSONDataURLResponse() throws {
+        let png = Self.pngDataWithITXt(keyword: "NovelAIMetadata", value: "{}")
+        let json = """
+        {"images":[{"image":"data:image/png;base64,\(png.base64EncodedString())"}]}
+        """
+
+        let items = try NovelAIClient.extractImages(
+            fromImageResponseData: Data(json.utf8),
+            prompt: "base prompt",
+            negativePrompt: "",
+            model: "nai-diffusion-4-5-full"
+        )
+
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items.first?.mimeType, "image/png")
+        XCTAssertEqual(items.first?.imageData, png)
+    }
+
     func testAIUsageFormatsCacheHitSummaryAndSettingsHelp() throws {
         let json = """
         {"prompt_tokens":1000,"completion_tokens":200,"total_tokens":1200,"prompt_cache_hit_tokens":750,"prompt_cache_miss_tokens":250}
@@ -2084,6 +2255,44 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(sillyCard.lorebooks.first?.secondaryKeywords, ["side"])
         XCTAssertTrue(sillyCard.lorebooks.first?.permanent == true)
         XCTAssertEqual(sillyCard.lorebooks.first?.probability, 75)
+
+        let sillyWithTimeTavernExtensionJSON = """
+        {
+          "spec":"chara_card_v2",
+          "data":{
+            "name":"外層名稱",
+            "description":"",
+            "personality":"",
+            "scenario":"",
+            "first_mes":"外層開場不應覆蓋",
+            "extensions":{
+              "time_tavern_role_card":{
+                "id":"embedded_1",
+                "name":"內嵌角色",
+                "mode":"multi",
+                "customSections":[
+                  {"name":"核心設定","content":"核心內容","enabled":true},
+                  {"name":"角色設定","content":"角色內容","enabled":true}
+                ],
+                "openingDialogues":[
+                  {"name":"開場 1","content":"內嵌開場一"},
+                  {"name":"開場 2","content":"內嵌開場二"}
+                ],
+                "lorebooks":[
+                  {"id":"lore_1","title":"內嵌世界書","keywords":["世界"],"content":"世界書內容","enabled":true}
+                ]
+              }
+            }
+          }
+        }
+        """
+        let embeddedCard = try service.importRoleCardJSON(from: Data(sillyWithTimeTavernExtensionJSON.utf8), existingRoleCards: [])
+
+        XCTAssertEqual(embeddedCard.name, "內嵌角色")
+        XCTAssertEqual(embeddedCard.customSections.map(\.name), ["核心設定", "角色設定"])
+        XCTAssertEqual(embeddedCard.customSections.map(\.content), ["核心內容", "角色內容"])
+        XCTAssertEqual(embeddedCard.openingDialogues.map(\.content), ["內嵌開場一", "內嵌開場二"])
+        XCTAssertEqual(embeddedCard.lorebooks.first?.title, "內嵌世界書")
     }
 
     func testRoleCardImageImportSupportsWebPngAndJpegMetadata() throws {
@@ -2336,6 +2545,114 @@ final class TimeTavernTests: XCTestCase {
         return data
     }
 
+    private static func zipData(entries: [(fileName: String, data: Data)]) throws -> Data {
+        var localRecords = Data()
+        var centralDirectory = Data()
+        for entry in entries {
+            let localOffset = UInt32(localRecords.count)
+            let fileNameData = Data(entry.fileName.utf8)
+            let compressedData = try deflateRaw(entry.data)
+            appendLocalZipHeader(
+                to: &localRecords,
+                fileNameData: fileNameData,
+                compressedData: compressedData,
+                uncompressedData: entry.data
+            )
+            localRecords.append(compressedData)
+            appendCentralZipHeader(
+                to: &centralDirectory,
+                fileNameData: fileNameData,
+                compressedData: compressedData,
+                uncompressedData: entry.data,
+                localHeaderOffset: localOffset
+            )
+        }
+
+        let centralDirectoryOffset = UInt32(localRecords.count)
+        let centralDirectorySize = UInt32(centralDirectory.count)
+        var output = localRecords
+        output.append(centralDirectory)
+        output.appendLittleEndianUInt32(0x0605_4b50)
+        output.appendLittleEndianUInt16(0)
+        output.appendLittleEndianUInt16(0)
+        output.appendLittleEndianUInt16(UInt16(entries.count))
+        output.appendLittleEndianUInt16(UInt16(entries.count))
+        output.appendLittleEndianUInt32(centralDirectorySize)
+        output.appendLittleEndianUInt32(centralDirectoryOffset)
+        output.appendLittleEndianUInt16(0)
+        return output
+    }
+
+    private static func appendLocalZipHeader(
+        to data: inout Data,
+        fileNameData: Data,
+        compressedData: Data,
+        uncompressedData: Data
+    ) {
+        data.appendLittleEndianUInt32(0x0403_4b50)
+        data.appendLittleEndianUInt16(20)
+        data.appendLittleEndianUInt16(0)
+        data.appendLittleEndianUInt16(8)
+        data.appendLittleEndianUInt16(0)
+        data.appendLittleEndianUInt16(0)
+        data.appendLittleEndianUInt32(0)
+        data.appendLittleEndianUInt32(UInt32(compressedData.count))
+        data.appendLittleEndianUInt32(UInt32(uncompressedData.count))
+        data.appendLittleEndianUInt16(UInt16(fileNameData.count))
+        data.appendLittleEndianUInt16(0)
+        data.append(fileNameData)
+    }
+
+    private static func appendCentralZipHeader(
+        to data: inout Data,
+        fileNameData: Data,
+        compressedData: Data,
+        uncompressedData: Data,
+        localHeaderOffset: UInt32
+    ) {
+        data.appendLittleEndianUInt32(0x0201_4b50)
+        data.appendLittleEndianUInt16(20)
+        data.appendLittleEndianUInt16(20)
+        data.appendLittleEndianUInt16(0)
+        data.appendLittleEndianUInt16(8)
+        data.appendLittleEndianUInt16(0)
+        data.appendLittleEndianUInt16(0)
+        data.appendLittleEndianUInt32(0)
+        data.appendLittleEndianUInt32(UInt32(compressedData.count))
+        data.appendLittleEndianUInt32(UInt32(uncompressedData.count))
+        data.appendLittleEndianUInt16(UInt16(fileNameData.count))
+        data.appendLittleEndianUInt16(0)
+        data.appendLittleEndianUInt16(0)
+        data.appendLittleEndianUInt16(0)
+        data.appendLittleEndianUInt16(0)
+        data.appendLittleEndianUInt32(0)
+        data.appendLittleEndianUInt32(localHeaderOffset)
+        data.append(fileNameData)
+    }
+
+    private static func deflateRaw(_ data: Data) throws -> Data {
+        var outputSize = max(1024, data.count * 2)
+        for _ in 0..<8 {
+            var output = [UInt8](repeating: 0, count: outputSize)
+            let encodedSize = data.withUnsafeBytes { sourceRawBuffer -> Int in
+                guard let source = sourceRawBuffer.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return compression_encode_buffer(
+                    &output,
+                    output.count,
+                    source,
+                    data.count,
+                    nil,
+                    COMPRESSION_ZLIB
+                )
+            }
+            if encodedSize > 0 {
+                return Data(output.prefix(encodedSize))
+            }
+            outputSize *= 2
+        }
+        throw TimeTavernError.network("測試 ZIP 建立失敗。")
+    }
+
     private static func jpegRoleCardData(payloadText: String) -> Data {
         let metadata = Array("TimeTavernRoleCard\0\(String(1).leftPadded(to: 4))/\(String(1).leftPadded(to: 4))\0\(payloadText)".utf8)
         let length = UInt16(metadata.count + 2)
@@ -2364,5 +2681,19 @@ final class TimeTavernTests: XCTestCase {
 private extension String {
     func leftPadded(to length: Int) -> String {
         String(repeating: "0", count: max(0, length - count)) + self
+    }
+}
+
+private extension Data {
+    mutating func appendLittleEndianUInt16(_ value: UInt16) {
+        append(UInt8(value & 0xff))
+        append(UInt8((value >> 8) & 0xff))
+    }
+
+    mutating func appendLittleEndianUInt32(_ value: UInt32) {
+        append(UInt8(value & 0xff))
+        append(UInt8((value >> 8) & 0xff))
+        append(UInt8((value >> 16) & 0xff))
+        append(UInt8((value >> 24) & 0xff))
     }
 }

@@ -400,9 +400,10 @@ private struct SillyTavernCardData: Decodable {
     var postHistoryInstructions: String?
     var avatar: String?
     var characterBook: SillyTavernCharacterBook?
+    var extensions: SillyTavernExtensions?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, personality, scenario, avatar
+        case name, description, personality, scenario, avatar, extensions
         case firstMes = "first_mes"
         case alternateGreetings = "alternate_greetings"
         case mesExample = "mes_example"
@@ -412,6 +413,10 @@ private struct SillyTavernCardData: Decodable {
     }
 
     var native: RoleCard {
+        if let embedded = extensions?.timeTavernRoleCard {
+            return nativeFromEmbeddedTimeTavernRoleCard(embedded)
+        }
+
         var sections: [CustomSection] = []
         appendSection("描述", description, to: &sections)
         appendSection("性格", personality, to: &sections)
@@ -444,6 +449,42 @@ private struct SillyTavernCardData: Decodable {
         return card
     }
 
+    private func nativeFromEmbeddedTimeTavernRoleCard(_ embedded: WebRoleCard) -> RoleCard {
+        var card = embedded.native
+        if card.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let name,
+           !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            card.name = name
+        }
+        if card.coverImageDataURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            card.coverImageDataURL = avatar ?? ""
+            card.coverImageData = Self.decodeDataURL(avatar)
+        }
+        if card.openingDialogues.isEmpty || card.openingDialogues.allSatisfy({ $0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            let openings = fallbackOpeningDialogues()
+            if !openings.isEmpty {
+                card.openingDialogues = openings
+                card.activeOpeningDialogueId = openings.first?.id ?? ""
+            }
+        }
+        if card.lorebooks.isEmpty {
+            card.lorebooks = characterBook?.entries.map(\.native) ?? []
+        }
+        return card
+    }
+
+    private func fallbackOpeningDialogues() -> [OpeningDialogue] {
+        ([firstMes] + (alternateGreetings ?? []).map(Optional.some))
+            .compactMap { value -> String? in
+                let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            .enumerated()
+            .map { index, content in
+                OpeningDialogue(name: index == 0 ? "開場" : "替代開場 \(index)", content: content)
+            }
+    }
+
     private func appendSection(_ name: String, _ content: String?, to sections: inout [CustomSection]) {
         let trimmed = (content ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -454,6 +495,21 @@ private struct SillyTavernCardData: Decodable {
         guard let dataURL, let commaIndex = dataURL.firstIndex(of: ",") else { return nil }
         let encoded = String(dataURL[dataURL.index(after: commaIndex)...])
         return Data(base64Encoded: encoded)
+    }
+}
+
+private struct SillyTavernExtensions: Decodable {
+    var timeTavernRoleCard: WebRoleCard?
+
+    enum CodingKeys: String, CodingKey {
+        case timeTavernRoleCardSnake = "time_tavern_role_card"
+        case timeTavernRoleCardCamel = "timeTavernRoleCard"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        timeTavernRoleCard = try container.decodeIfPresent(WebRoleCard.self, forKey: .timeTavernRoleCardSnake) ??
+            container.decodeIfPresent(WebRoleCard.self, forKey: .timeTavernRoleCardCamel)
     }
 }
 

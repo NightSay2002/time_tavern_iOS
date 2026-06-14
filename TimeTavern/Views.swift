@@ -1029,6 +1029,7 @@ struct MessageBubble: View {
     var message: ConversationMessage
     var previewImage: (Data) -> Void = { _ in }
     static let usesPartialTextSelectableView = true
+    static let usesWebInspiredMarkdownSurface = true
     static let generatedImagesOpenPreviewOnTap = true
     static let compressionNoticeText = "已壓縮上下文"
 
@@ -1046,7 +1047,11 @@ struct MessageBubble: View {
                 }
                 let displayText = Self.displayText(for: message)
                 if !displayText.isEmpty {
-                    SelectableMessageText(text: displayText)
+                    SelectableMessageText(
+                        text: displayText,
+                        role: message.role,
+                        isReasoningPreview: Self.isShowingReasoningPreview(message)
+                    )
                 }
                 if let imageData = message.imageData, let image = UIImage(data: imageData) {
                     Button {
@@ -1077,15 +1082,32 @@ struct MessageBubble: View {
             }
             .padding(12)
             .background(
-                message.role == .user ? VNTheme.accent.opacity(0.30) : VNTheme.panelBright.opacity(0.68),
+                messageBackground,
                 in: RoundedRectangle(cornerRadius: 16, style: .continuous)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(message.role == .user ? VNTheme.accent.opacity(0.32) : Color.white.opacity(0.12), lineWidth: 1)
+                    .stroke(message.role == .user ? VNTheme.accent.opacity(0.38) : Color.white.opacity(0.14), lineWidth: 1)
             )
+            .overlay(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(message.role == .user ? Color.white.opacity(0.36) : VNTheme.accent.opacity(0.62))
+                    .frame(width: 3)
+                    .padding(.vertical, 12)
+            }
+            .shadow(color: VNTheme.ink.opacity(0.32), radius: 14, y: 8)
             if message.role != .user { Spacer(minLength: 40) }
         }
+    }
+
+    private var messageBackground: some ShapeStyle {
+        LinearGradient(
+            colors: message.role == .user
+                ? [VNTheme.accent.opacity(0.34), Color(red: 0.20, green: 0.12, blue: 0.34).opacity(0.72)]
+                : [VNTheme.panelBright.opacity(0.76), VNTheme.ink.opacity(0.74)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
     }
 
     static func displayText(for message: ConversationMessage) -> String {
@@ -1094,12 +1116,20 @@ struct MessageBubble: View {
         }
         return message.streamingReasoningPreview
     }
+
+    static func isShowingReasoningPreview(_ message: ConversationMessage) -> Bool {
+        message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !message.streamingReasoningPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 }
 
 struct SelectableMessageText: UIViewRepresentable {
     var text: String
+    var role: MessageRole = .assistant
+    var isReasoningPreview = false
     static let supportsPartialTextSelection = true
     static let isEditable = false
+    static let supportsMarkdownAndHTMLRendering = true
 
     func makeUIView(context: Context) -> UITextView {
         let textView = UITextView()
@@ -1114,21 +1144,36 @@ struct SelectableMessageText: UIViewRepresentable {
         textView.adjustsFontForContentSizeCategory = true
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         textView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        textView.linkTextAttributes = [
+            .foregroundColor: UIColor(red: 0.53, green: 0.78, blue: 1.0, alpha: 1.0),
+            .underlineStyle: NSUnderlineStyle.single.rawValue
+        ]
         applyStyle(to: textView)
         return textView
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
-        if textView.text != text {
-            textView.text = text
+        let key = "\(role.rawValue)|\(isReasoningPreview)|\(text)"
+        if context.coordinator.renderKey != key {
+            context.coordinator.renderKey = key
+            context.coordinator.renderedText = MessageMarkupRenderer.attributedString(
+                for: text,
+                role: role,
+                isReasoningPreview: isReasoningPreview
+            )
+            textView.attributedText = context.coordinator.renderedText
         }
         applyStyle(to: textView)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context: Context) -> CGSize? {
         let maxWidth = max(1, proposal.width ?? UIScreen.main.bounds.width - 104)
         let fittingHeight = uiView.sizeThatFits(CGSize(width: maxWidth, height: .greatestFiniteMagnitude)).height
-        let measuredWidth = Self.measuredTextWidth(text, font: uiView.font ?? .preferredFont(forTextStyle: .body), maxWidth: maxWidth)
+        let measuredWidth = Self.measuredTextWidth(uiView.attributedText ?? NSAttributedString(string: text), maxWidth: maxWidth)
         return CGSize(width: measuredWidth, height: fittingHeight)
     }
 
@@ -1138,15 +1183,446 @@ struct SelectableMessageText: UIViewRepresentable {
         textView.font = .preferredFont(forTextStyle: .body)
     }
 
-    static func measuredTextWidth(_ text: String, font: UIFont, maxWidth: CGFloat) -> CGFloat {
-        let value = text.isEmpty ? " " : text
-        let rect = (value as NSString).boundingRect(
+    static func measuredTextWidth(_ text: NSAttributedString, maxWidth: CGFloat) -> CGFloat {
+        let value = text.length == 0 ? NSAttributedString(string: " ", attributes: [.font: UIFont.preferredFont(forTextStyle: .body)]) : text
+        let rect = value.boundingRect(
             with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font],
             context: nil
         )
         return min(max(ceil(rect.width) + 1, 1), maxWidth)
+    }
+
+    final class Coordinator {
+        var renderKey = ""
+        var renderedText = NSAttributedString(string: "")
+    }
+}
+
+enum MessageMarkupRenderer {
+    static let supportsMarkdownAndHTML = true
+    static let mirrorsWebMarkdownRendering = true
+    static let allowsHTMLForAssistantMessages = true
+    static let usesHTMLImporterForDisplay = false
+    static let rendersUserMessagesAsPlainTextForSendStability = true
+
+    static func attributedString(
+        for text: String,
+        role: MessageRole,
+        isReasoningPreview: Bool = false
+    ) -> NSAttributedString {
+        if role == .user {
+            return fallbackAttributedString(for: text, isReasoningPreview: isReasoningPreview)
+        }
+
+        let displaySource = markdownDisplaySource(for: text, role: role)
+        guard let parsed = try? AttributedString(
+            markdown: displaySource,
+            options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) else {
+            return fallbackAttributedString(for: plainDisplayText(for: text, role: role), isReasoningPreview: isReasoningPreview)
+        }
+
+        let attributed = NSMutableAttributedString(attributedString: NSAttributedString(parsed))
+        applyBaseDisplayAttributes(to: attributed, isReasoningPreview: isReasoningPreview)
+        trimTerminalNewlines(from: attributed)
+        return attributed
+    }
+
+    static func renderedHTML(for text: String, role: MessageRole) -> String {
+        let allowHTML = role == .assistant && allowsHTMLForAssistantMessages
+        return renderMarkdownToHTML(text, allowHTML: allowHTML)
+    }
+
+    private static func renderMarkdownToHTML(_ markdown: String, allowHTML: Bool) -> String {
+        let source = String(markdown)
+        guard !source.isEmpty else { return "" }
+
+        var html: [String] = []
+        var paragraph: [String] = []
+        var listType = ""
+        var inCodeBlock = false
+        var codeLanguage = ""
+        var codeLines: [String] = []
+
+        func flushParagraph() {
+            guard !paragraph.isEmpty else { return }
+            html.append("<p>\(paragraph.map(renderInlineMarkdown).joined(separator: "<br>"))</p>")
+            paragraph.removeAll()
+        }
+
+        func closeList() {
+            guard !listType.isEmpty else { return }
+            html.append("</\(listType)>")
+            listType = ""
+        }
+
+        func closeCodeBlock() {
+            let languageClass = codeLanguage.isEmpty ? "" : " class=\"language-\(escapeAttribute(codeLanguage))\""
+            html.append("<pre><code\(languageClass)>\(escapeHTML(codeLines.joined(separator: "\n")))</code></pre>")
+            codeLanguage = ""
+            codeLines.removeAll()
+            inCodeBlock = false
+        }
+
+        source.components(separatedBy: .newlines).forEach { line in
+            if line.hasPrefix("```") {
+                if inCodeBlock {
+                    closeCodeBlock()
+                } else {
+                    flushParagraph()
+                    closeList()
+                    inCodeBlock = true
+                    codeLanguage = String(line.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                return
+            }
+
+            if inCodeBlock {
+                codeLines.append(line)
+                return
+            }
+
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                flushParagraph()
+                closeList()
+                return
+            }
+
+            if let heading = firstMatch(#"^(#{1,6})\s+(.+)$"#, in: line) {
+                flushParagraph()
+                closeList()
+                let level = min(6, capture(1, in: heading, source: line).count)
+                html.append("<h\(level)>\(renderInlineMarkdown(capture(2, in: heading, source: line)))</h\(level)>")
+                return
+            }
+
+            if let quote = firstMatch(#"^>\s?(.*)$"#, in: line) {
+                flushParagraph()
+                closeList()
+                html.append("<blockquote>\(renderInlineMarkdown(capture(1, in: quote, source: line)))</blockquote>")
+                return
+            }
+
+            if line.trimmingCharacters(in: .whitespaces) == "---" {
+                flushParagraph()
+                closeList()
+                html.append("<hr>")
+                return
+            }
+
+            let unordered = firstMatch(#"^\s*[-*+]\s+(.+)$"#, in: line)
+            let ordered = firstMatch(#"^\s*\d+\.\s+(.+)$"#, in: line)
+            if let match = unordered ?? ordered {
+                flushParagraph()
+                let nextType = unordered == nil ? "ol" : "ul"
+                if listType != nextType {
+                    closeList()
+                    listType = nextType
+                    html.append("<\(listType)>")
+                }
+                html.append("<li>\(renderInlineMarkdown(capture(1, in: match, source: line)))</li>")
+                return
+            }
+
+            closeList()
+            paragraph.append(line)
+        }
+
+        if inCodeBlock {
+            closeCodeBlock()
+        }
+        flushParagraph()
+        closeList()
+
+        let rendered = html.joined(separator: "\n")
+        guard allowHTML else { return rendered }
+        return sanitizeMessageHTML(decodeEscapedHTMLTags(rendered))
+    }
+
+    private static func renderInlineMarkdown(_ text: String) -> String {
+        var output = escapeHTML(text)
+        var codeSpans: [String] = []
+        output = replaceRegex(#"`([^`\n]+?)`"#, in: output) { match, nsString in
+            let token = "\u{0000}CODE\(codeSpans.count)\u{0000}"
+            codeSpans.append("<code>\(capture(1, in: match, source: nsString))</code>")
+            return token
+        }
+        output = replaceRegex(#"\[([^\]\n]+?)\]\((https?:\/\/[^\s)]+)\)"#, in: output) { match, nsString in
+            let label = capture(1, in: match, source: nsString)
+            let href = escapeAttribute(capture(2, in: match, source: nsString))
+            return "<a href=\"\(href)\">\(label)</a>"
+        }
+        output = replaceRegex(#"\*\*([^*\n]+?)\*\*"#, in: output) { match, nsString in
+            "<strong>\(capture(1, in: match, source: nsString))</strong>"
+        }
+        output = replaceRegex(#"__([^_\n]+?)__"#, in: output) { match, nsString in
+            "<strong>\(capture(1, in: match, source: nsString))</strong>"
+        }
+        output = replaceRegex(#"~~([^~\n]+?)~~"#, in: output) { match, nsString in
+            "<del>\(capture(1, in: match, source: nsString))</del>"
+        }
+        output = replaceRegex(#"(^|[^\*])\*([^*\n]+?)\*"#, in: output) { match, nsString in
+            "\(capture(1, in: match, source: nsString))<em>\(capture(2, in: match, source: nsString))</em>"
+        }
+        output = replaceRegex(#"(^|[^_])_([^_\n]+?)_"#, in: output) { match, nsString in
+            "\(capture(1, in: match, source: nsString))<em>\(capture(2, in: match, source: nsString))</em>"
+        }
+        codeSpans.enumerated().forEach { index, html in
+            output = output.replacingOccurrences(of: "\u{0000}CODE\(index)\u{0000}", with: html)
+        }
+        return output
+    }
+
+    private static func htmlDocument(body: String, isReasoningPreview: Bool) -> String {
+        let bodySize = max(15, UIFont.preferredFont(forTextStyle: .body).pointSize)
+        let bodyColor = isReasoningPreview ? "#aaa4c7" : "#ffffff"
+        let fontStyle = isReasoningPreview ? "font-style: italic;" : ""
+        return """
+        <!doctype html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <style>
+        body {
+          margin: 0;
+          color: \(bodyColor);
+          font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang TC", "Noto Sans TC", sans-serif;
+          font-size: \(bodySize)px;
+          line-height: 1.55;
+          word-break: break-word;
+          \(fontStyle)
+        }
+        p { margin: 0 0 0.75em; }
+        p:last-child { margin-bottom: 0; }
+        h1, h2, h3, h4, h5, h6 {
+          margin: 0.6em 0 0.35em;
+          line-height: 1.25;
+          color: #ffd6f2;
+          font-weight: 900;
+        }
+        h1 { font-size: 1.35em; }
+        h2 { font-size: 1.25em; }
+        h3 { font-size: 1.15em; }
+        ul, ol { margin: 0.4em 0 0.85em; padding-left: 1.35em; }
+        li { margin: 0.18em 0; }
+        blockquote {
+          margin: 0.6em 0;
+          padding: 0.55em 0.8em;
+          border-left: 3px solid rgba(255, 79, 200, 0.72);
+          border-radius: 0 10px 10px 0;
+          background-color: rgba(255, 79, 200, 0.10);
+          color: #f3e8ff;
+        }
+        code {
+          padding: 0.08em 0.32em;
+          border-radius: 6px;
+          background-color: rgba(5, 10, 18, 0.72);
+          color: #bfece6;
+          font-family: Menlo, ui-monospace, monospace;
+          font-size: 0.9em;
+        }
+        pre {
+          margin: 0.65em 0;
+          padding: 0.85em;
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 12px;
+          background-color: rgba(5, 10, 18, 0.76);
+        }
+        pre code {
+          padding: 0;
+          background-color: transparent;
+          white-space: pre-wrap;
+        }
+        a { color: #86c6ff; text-decoration: underline; }
+        table { width: 100%; margin: 0.75em 0; border-collapse: collapse; }
+        th, td { padding: 0.45em 0.6em; border: 1px solid rgba(255, 255, 255, 0.16); vertical-align: top; }
+        th { background-color: rgba(255, 255, 255, 0.08); color: #ffd6f2; }
+        hr { margin: 0.85em 0; border: 0; border-top: 1px solid rgba(255, 255, 255, 0.18); }
+        </style>
+        </head>
+        <body>\(body)</body>
+        </html>
+        """
+    }
+
+    private static func markdownDisplaySource(for text: String, role: MessageRole) -> String {
+        guard role == .assistant else { return text }
+        let rendered = renderMarkdownToHTML(text, allowHTML: allowsHTMLForAssistantMessages)
+        return normalizedDisplayText(htmlToMarkdownLikeText(rendered))
+    }
+
+    private static func plainDisplayText(for text: String, role: MessageRole) -> String {
+        guard role == .assistant else { return text }
+        return stripHTMLTags(markdownDisplaySource(for: text, role: role))
+    }
+
+    private static func htmlToMarkdownLikeText(_ value: String) -> String {
+        var output = value
+        output = replaceRegex("(?is)<pre\\b[^>]*>\\s*<code\\b[^>]*>([\\s\\S]*?)</code>\\s*</pre>", in: output) { match, source in
+            "\n\(decodeHTMLEntities(stripHTMLTags(capture(1, in: match, source: source))))\n"
+        }
+        output = replaceRegex("(?is)<br\\s*/?>", in: output) { _, _ in "\n" }
+        output = replaceRegex("(?is)</p\\s*>|</div\\s*>|</section\\s*>|</article\\s*>", in: output) { _, _ in "\n\n" }
+        output = replaceRegex("(?is)<h([1-6])\\b[^>]*>([\\s\\S]*?)</h\\1>", in: output) { match, source in
+            let level = max(1, min(6, Int(capture(1, in: match, source: source)) ?? 1))
+            return "\n\(String(repeating: "#", count: level)) \(stripHTMLTags(capture(2, in: match, source: source)))\n"
+        }
+        output = replaceRegex("(?is)<blockquote\\b[^>]*>([\\s\\S]*?)</blockquote>", in: output) { match, source in
+            stripHTMLTags(capture(1, in: match, source: source))
+                .components(separatedBy: .newlines)
+                .map { "> \($0)" }
+                .joined(separator: "\n")
+        }
+        output = replaceRegex("(?is)<(strong|b)\\b[^>]*>([\\s\\S]*?)</\\1>", in: output) { match, source in
+            "**\(stripHTMLTags(capture(2, in: match, source: source)))**"
+        }
+        output = replaceRegex("(?is)<(em|i)\\b[^>]*>([\\s\\S]*?)</\\1>", in: output) { match, source in
+            "*\(stripHTMLTags(capture(2, in: match, source: source)))*"
+        }
+        output = replaceRegex("(?is)<code\\b[^>]*>([\\s\\S]*?)</code>", in: output) { match, source in
+            "`\(stripHTMLTags(capture(1, in: match, source: source)))`"
+        }
+        output = replaceRegex("(?is)<li\\b[^>]*>([\\s\\S]*?)</li>", in: output) { match, source in
+            "\n- \(stripHTMLTags(capture(1, in: match, source: source)))"
+        }
+        output = replaceRegex("(?is)<a\\b[^>]*href\\s*=\\s*['\"]([^'\"]+)['\"][^>]*>([\\s\\S]*?)</a>", in: output) { match, source in
+            "[\(stripHTMLTags(capture(2, in: match, source: source)))](\(capture(1, in: match, source: source)))"
+        }
+        output = stripHTMLTags(output)
+        return decodeHTMLEntities(output)
+    }
+
+    private static func normalizedDisplayText(_ value: String) -> String {
+        var output = value
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        output = replaceRegex("[\\t ]+\\n", in: output) { _, _ in "\n" }
+        output = replaceRegex("\\n{3,}", in: output) { _, _ in "\n\n" }
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func stripHTMLTags(_ value: String) -> String {
+        replaceRegex("(?is)<[^>]+>", in: value) { _, _ in "" }
+    }
+
+    private static func applyBaseDisplayAttributes(to attributed: NSMutableAttributedString, isReasoningPreview: Bool) {
+        guard attributed.length > 0 else { return }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 3
+        paragraph.paragraphSpacing = 8
+        attributed.addAttributes(
+            [
+                .foregroundColor: isReasoningPreview
+                    ? UIColor(red: 0.67, green: 0.64, blue: 0.78, alpha: 1.0)
+                    : UIColor.white,
+                .paragraphStyle: paragraph
+            ],
+            range: NSRange(location: 0, length: attributed.length)
+        )
+    }
+
+    private static func fallbackAttributedString(for text: String, isReasoningPreview: Bool) -> NSAttributedString {
+        NSAttributedString(
+            string: text,
+            attributes: [
+                .font: UIFont.preferredFont(forTextStyle: .body),
+                .foregroundColor: isReasoningPreview
+                    ? UIColor(red: 0.67, green: 0.64, blue: 0.78, alpha: 1.0)
+                    : UIColor.white
+            ]
+        )
+    }
+
+    private static func trimTerminalNewlines(from attributed: NSMutableAttributedString) {
+        while attributed.length > 0, attributed.string.hasSuffix("\n") {
+            attributed.deleteCharacters(in: NSRange(location: attributed.length - 1, length: 1))
+        }
+    }
+
+    private static func sanitizeMessageHTML(_ html: String) -> String {
+        var output = html
+        ["script", "style", "iframe", "object", "embed", "form", "input", "button", "textarea", "select", "option", "meta", "link"].forEach { tag in
+            output = replaceRegex("(?is)<\(tag)\\b[^>]*>[\\s\\S]*?</\(tag)>", in: output) { _, _ in "" }
+            output = replaceRegex("(?is)</?\(tag)\\b[^>]*>", in: output) { _, _ in "" }
+        }
+        output = replaceRegex(#"\s+on[a-zA-Z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)"#, in: output) { _, _ in "" }
+        output = replaceRegex(#"\s+srcdoc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)"#, in: output) { _, _ in "" }
+        output = replaceRegex(#"\s+(href|src)\s*=\s*(['"])\s*(javascript:|vbscript:)[\s\S]*?\2"#, in: output, options: [.caseInsensitive]) { _, _ in "" }
+        return output
+    }
+
+    private static func decodeEscapedHTMLTags(_ html: String) -> String {
+        replaceRegex(#"&lt;(\/?)([a-zA-Z][\w:-]*)([\s\S]*?)&gt;"#, in: html) { match, nsString in
+            let closing = capture(1, in: match, source: nsString)
+            let tag = capture(2, in: match, source: nsString)
+            let attrs = decodeHTMLEntities(capture(3, in: match, source: nsString))
+            return "<\(closing)\(tag)\(attrs)>"
+        }
+    }
+
+    private static func decodeHTMLEntities(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&#39;", with: "'")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&amp;", with: "&")
+    }
+
+    private static func escapeHTML(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    private static func escapeAttribute(_ value: String) -> String {
+        escapeHTML(value).replacingOccurrences(of: "'", with: "&#39;")
+    }
+
+    private static func firstMatch(_ pattern: String, in source: String) -> NSTextCheckingResult? {
+        let regex = try? NSRegularExpression(pattern: pattern)
+        let range = NSRange(source.startIndex..., in: source)
+        return regex?.firstMatch(in: source, range: range)
+    }
+
+    private static func replaceRegex(
+        _ pattern: String,
+        in source: String,
+        options: NSRegularExpression.Options = [],
+        transform: (NSTextCheckingResult, NSString) -> String
+    ) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return source }
+        let nsString = source as NSString
+        let matches = regex.matches(in: source, range: NSRange(location: 0, length: nsString.length))
+        guard !matches.isEmpty else { return source }
+        var output = ""
+        var currentLocation = 0
+        matches.forEach { match in
+            let prefixLength = match.range.location - currentLocation
+            if prefixLength > 0 {
+                output += nsString.substring(with: NSRange(location: currentLocation, length: prefixLength))
+            }
+            output += transform(match, nsString)
+            currentLocation = match.range.location + match.range.length
+        }
+        if currentLocation < nsString.length {
+            output += nsString.substring(from: currentLocation)
+        }
+        return output
+    }
+
+    private static func capture(_ index: Int, in match: NSTextCheckingResult, source: String) -> String {
+        capture(index, in: match, source: source as NSString)
+    }
+
+    private static func capture(_ index: Int, in match: NSTextCheckingResult, source: NSString) -> String {
+        guard index < match.numberOfRanges else { return "" }
+        let range = match.range(at: index)
+        guard range.location != NSNotFound else { return "" }
+        return source.substring(with: range)
     }
 }
 
@@ -1301,13 +1777,27 @@ struct ComposerInsertItem: Identifiable, Hashable {
 struct CharactersView: View {
     @EnvironmentObject private var store: TimeTavernStore
     @State private var editingCard: RoleCard?
+    @State private var roleCardPendingDelete: RoleCard?
     @State private var showAssistantPromptEditor = false
     @State private var query = ""
     static let separatesRoleCardsAndAssistantCards = true
+    static let exposesRoleCardDeleteAction = true
+    static let confirmsRoleCardDeletion = true
 
     var filteredCards: [RoleCard] {
         guard !query.isEmpty else { return store.state.roleCards }
         return store.state.roleCards.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    }
+
+    private var deleteConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { roleCardPendingDelete != nil },
+            set: { isPresented in
+                if !isPresented {
+                    roleCardPendingDelete = nil
+                }
+            }
+        )
     }
 
     var body: some View {
@@ -1323,33 +1813,12 @@ struct CharactersView: View {
                 }
                 Section(uiStatic("助手卡")) {
                     ForEach(AssistantCard.allCards) { assistantCard in
-                        VStack(alignment: .leading, spacing: 10) {
-                            AssistantCardRow(
-                                assistantCard: assistantCard,
-                                isActive: store.state.activeAssistantMode == assistantCard.id
-                            )
-                            HStack {
-                                Button {
-                                    store.start(assistantCard: assistantCard)
-                                } label: {
-                                    Label(uiStatic("啟用助手"), systemImage: "play.fill")
-                                }
-                                Button {
-                                    showAssistantPromptEditor = true
-                                } label: {
-                                    Label(uiStatic("編輯 Prompt"), systemImage: "square.and.pencil")
-                                }
-                            }
-                            .font(.caption.weight(.semibold))
-                        }
-                        .swipeActions {
-                            Button(uiStatic("啟用")) { store.start(assistantCard: assistantCard) }.tint(VNTheme.accent)
-                            Button("Prompt") { showAssistantPromptEditor = true }.tint(Color(red: 0.36, green: 0.42, blue: 1.0))
-                        }
-                        .contextMenu {
-                            Button(uiStatic("啟用助手")) { store.start(assistantCard: assistantCard) }
-                            Button(uiStatic("編輯助手 Prompt")) { showAssistantPromptEditor = true }
-                        }
+                        AssistantCardListItem(
+                            assistantCard: assistantCard,
+                            isActive: store.state.activeAssistantMode == assistantCard.id,
+                            onStart: { store.start(assistantCard: assistantCard) },
+                            onEditPrompt: { showAssistantPromptEditor = true }
+                        )
                     }
                 }
                 Section(uiStatic("角色卡")) {
@@ -1359,12 +1828,13 @@ struct CharactersView: View {
                             .foregroundStyle(VNTheme.textSecondary)
                     } else {
                         ForEach(filteredCards) { card in
-                            RoleCardRow(card: card, isActive: card.id == store.state.activeRoleCardId)
-                                .swipeActions {
-                                    Button(uiStatic("開始")) { store.start(roleCard: card) }.tint(VNTheme.accent)
-                                    Button(uiStatic("編輯")) { editingCard = card }.tint(Color(red: 0.36, green: 0.42, blue: 1.0))
-                                }
-                                .onTapGesture { editingCard = card }
+                            RoleCardListItem(
+                                card: card,
+                                isActive: card.id == store.state.activeRoleCardId,
+                                onStart: { store.start(roleCard: card) },
+                                onEdit: { editingCard = card },
+                                onDelete: { roleCardPendingDelete = card }
+                            )
                         }
                         .onDelete(perform: deleteFilteredRoleCards)
                     }
@@ -1379,13 +1849,128 @@ struct CharactersView: View {
             .sheet(isPresented: $showAssistantPromptEditor) {
                 AssistantPromptEditorView()
             }
+            .confirmationDialog(
+                uiStatic("刪除角色卡？"),
+                isPresented: deleteConfirmationPresented,
+                titleVisibility: .visible,
+                presenting: roleCardPendingDelete
+            ) { card in
+                Button(uiStatic("刪除"), role: .destructive) {
+                    deleteRoleCard(card)
+                }
+                Button(uiStatic("取消"), role: .cancel) {}
+            } message: { card in
+                Text(uiStatic("會刪除「\(card.name.isEmpty ? "未命名角色" : card.name)」。如果這是目前角色卡，也會停止啟用。"))
+            }
         }
     }
 
     private func deleteFilteredRoleCards(at offsets: IndexSet) {
         let ids = offsets.compactMap { filteredCards.indices.contains($0) ? filteredCards[$0].id : nil }
+        if let editingCard, ids.contains(editingCard.id) {
+            self.editingCard = nil
+        }
         let roleOffsets = IndexSet(ids.compactMap { id in store.state.roleCards.firstIndex { $0.id == id } })
         store.deleteRoleCards(at: roleOffsets)
+    }
+
+    private func deleteRoleCard(_ card: RoleCard) {
+        if editingCard?.id == card.id {
+            editingCard = nil
+        }
+        guard let index = store.state.roleCards.firstIndex(where: { $0.id == card.id }) else {
+            roleCardPendingDelete = nil
+            return
+        }
+        store.deleteRoleCards(at: IndexSet(integer: index))
+        roleCardPendingDelete = nil
+    }
+}
+
+struct AssistantCardListItem: View {
+    var assistantCard: AssistantCard
+    var isActive: Bool
+    var onStart: () -> Void
+    var onEditPrompt: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            AssistantCardRow(assistantCard: assistantCard, isActive: isActive)
+            HStack {
+                Button {
+                    onStart()
+                } label: {
+                    Label(uiStatic("啟用助手"), systemImage: "play.fill")
+                }
+                Button {
+                    onEditPrompt()
+                } label: {
+                    Label(uiStatic("編輯 Prompt"), systemImage: "square.and.pencil")
+                }
+            }
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.borderless)
+        }
+        .swipeActions {
+            Button(uiStatic("啟用")) { onStart() }.tint(VNTheme.accent)
+            Button("Prompt") { onEditPrompt() }.tint(Color(red: 0.36, green: 0.42, blue: 1.0))
+        }
+        .contextMenu {
+            Button(uiStatic("啟用助手")) { onStart() }
+            Button(uiStatic("編輯助手 Prompt")) { onEditPrompt() }
+        }
+    }
+}
+
+struct RoleCardListItem: View {
+    var card: RoleCard
+    var isActive: Bool
+    var onStart: () -> Void
+    var onEdit: () -> Void
+    var onDelete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            RoleCardRow(card: card, isActive: isActive)
+            HStack {
+                Button {
+                    onStart()
+                } label: {
+                    Label(uiStatic("開始"), systemImage: "play.fill")
+                }
+                Button {
+                    onEdit()
+                } label: {
+                    Label(uiStatic("編輯"), systemImage: "square.and.pencil")
+                }
+                Button(role: .destructive) {
+                    onDelete()
+                } label: {
+                    Label(uiStatic("刪除"), systemImage: "trash")
+                }
+            }
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.borderless)
+        }
+        .contentShape(Rectangle())
+        .swipeActions {
+            Button(uiStatic("開始")) { onStart() }.tint(VNTheme.accent)
+            Button(uiStatic("編輯")) { onEdit() }.tint(Color(red: 0.36, green: 0.42, blue: 1.0))
+            Button(role: .destructive) { onDelete() } label: {
+                Text(uiStatic("刪除"))
+            }
+            .tint(.red)
+        }
+        .contextMenu {
+            Button(uiStatic("開始")) { onStart() }
+            Button(uiStatic("編輯")) { onEdit() }
+            Button(role: .destructive) { onDelete() } label: {
+                Label(uiStatic("刪除"), systemImage: "trash")
+            }
+        }
+        .onTapGesture {
+            onEdit()
+        }
     }
 }
 
@@ -1533,6 +2118,9 @@ struct RoleCardEditorView: View {
     @State private var selectedLorebookId: String?
     @State private var coverPickerItem: PhotosPickerItem?
     @State private var coverCropDraft: RoleCardCoverCropDraft?
+    static let lorebookEditorExpandsInline = true
+    static let lorebookEditorUsesDetachedBottomPanel = false
+    static let lorebookEditorUsesIDBasedBindings = true
 
     init(card: RoleCard) {
         let normalized = Self.normalizedForSave(card)
@@ -1674,11 +2262,6 @@ struct RoleCardEditorView: View {
                                 }
                             }
                         }
-
-                        if let index = selectedLorebookIndex {
-                            Divider()
-                            lorebookEditor(entry: $card.lorebooks[index])
-                        }
                     }
                 }
                 Section("JSON") {
@@ -1792,56 +2375,63 @@ struct RoleCardEditorView: View {
         )
     }
 
-    private var selectedLorebookIndex: Int? {
-        guard let selectedLorebookId else { return nil }
-        return card.lorebooks.firstIndex { $0.id == selectedLorebookId }
-    }
-
     private func lorebookRow(entry: LorebookEntry, index: Int) -> some View {
-        let isSelected = entry.id == selectedLorebookId
-        return HStack(spacing: 8) {
-            Button {
-                selectLorebook(id: entry.id)
-            } label: {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(Self.lorebookSummaryTitle(entry, index: index))
-                        .font(.caption.weight(isSelected ? .semibold : .regular))
-                        .lineLimit(2)
-                    Text(entry.keywords.isEmpty ? uiStatic("無關鍵字") : entry.keywords.joined(separator: ", "))
-                        .font(.caption2)
-                        .foregroundStyle(VNTheme.textSecondary.opacity(0.82))
-                        .lineLimit(1)
+        let isSelected = Self.lorebookIsExpanded(entryID: entry.id, selectedLorebookID: selectedLorebookId)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Button {
+                    selectLorebook(id: entry.id)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(Self.lorebookSummaryTitle(entry, index: index))
+                            .font(.caption.weight(isSelected ? .semibold : .regular))
+                            .lineLimit(2)
+                        Text(entry.keywords.isEmpty ? uiStatic("無關鍵字") : entry.keywords.joined(separator: ", "))
+                            .font(.caption2)
+                            .foregroundStyle(VNTheme.textSecondary.opacity(0.82))
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.plain)
+                .buttonStyle(.plain)
 
-            Button {
-                toggleLorebookEnabled(id: entry.id)
-            } label: {
-                Text(entry.enabled ? uiStatic("啟用") : uiStatic("停用"))
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule()
-                            .fill(entry.enabled ? VNTheme.accent.opacity(0.20) : Color.white.opacity(0.08))
-                    )
-            }
-            .buttonStyle(.plain)
+                Button {
+                    toggleLorebookEnabled(id: entry.id)
+                } label: {
+                    Text(entry.enabled ? uiStatic("啟用") : uiStatic("停用"))
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule()
+                                .fill(entry.enabled ? VNTheme.accent.opacity(0.20) : Color.white.opacity(0.08))
+                        )
+                }
+                .buttonStyle(.plain)
 
-            Button(role: .destructive) {
-                deleteLorebook(id: entry.id)
-            } label: {
-                Image(systemName: "trash")
+                Image(systemName: isSelected ? "chevron.up" : "chevron.down")
                     .font(.caption.weight(.bold))
+                    .foregroundStyle(VNTheme.textSecondary.opacity(0.82))
+
+                Button(role: .destructive) {
+                    deleteLorebook(id: entry.id)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.caption.weight(.bold))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(uiStatic("刪除世界書條目"))
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(uiStatic("刪除世界書條目"))
+            if isSelected {
+                Divider()
+                    .overlay(Color.white.opacity(0.12))
+                lorebookEditor(entryID: entry.id)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
         .foregroundStyle(isSelected ? .white : VNTheme.textSecondary)
         .padding(.horizontal, 10)
-        .padding(.vertical, 9)
+        .padding(.vertical, 10)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(isSelected ? VNTheme.accent.opacity(0.20) : Color.white.opacity(0.06))
@@ -1850,24 +2440,54 @@ struct RoleCardEditorView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(isSelected ? VNTheme.accent.opacity(0.42) : Color.white.opacity(0.14), lineWidth: 1)
         )
+        .animation(.spring(response: 0.26, dampingFraction: 0.9), value: isSelected)
     }
 
-    private func lorebookEditor(entry: Binding<LorebookEntry>) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Toggle(uiStatic("啟用"), isOn: entry.enabled)
+    private func lorebookEditor(entryID: String) -> some View {
+        let probability = lorebookEntry(id: entryID).map { LorebookEntry.clampedProbability($0.probability) } ?? 100
+        return VStack(alignment: .leading, spacing: 12) {
+            Toggle(
+                uiStatic("啟用"),
+                isOn: lorebookBinding(
+                    id: entryID,
+                    default: true,
+                    get: { $0.enabled },
+                    set: { $0.enabled = $1 }
+                )
+            )
 
-            Toggle(uiStatic("永久啟用（放入角色卡自定義內容位置）"), isOn: entry.permanent)
+            Toggle(
+                uiStatic("永久啟用（放入角色卡自定義內容位置）"),
+                isOn: lorebookBinding(
+                    id: entryID,
+                    default: false,
+                    get: { $0.permanent },
+                    set: { $0.permanent = $1 }
+                )
+            )
 
-            TextField(uiStatic("條目標題 (Key)"), text: entry.title)
+            TextField(
+                uiStatic("條目標題 (Key)"),
+                text: lorebookBinding(
+                    id: entryID,
+                    default: "",
+                    get: { $0.title },
+                    set: { $0.title = $1 }
+                )
+            )
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(uiStatic("關鍵字 (Keywords)"))
                     .font(.caption)
                     .foregroundStyle(VNTheme.textSecondary)
-                TextEditor(text: Binding(
-                    get: { entry.wrappedValue.keywords.joined(separator: ", ") },
-                    set: { entry.wrappedValue.keywords = Self.parseLorebookTerms($0) }
-                ))
+                TextEditor(
+                    text: lorebookBinding(
+                        id: entryID,
+                        default: "",
+                        get: { $0.keywords.joined(separator: ", ") },
+                        set: { $0.keywords = Self.parseLorebookTerms($1) }
+                    )
+                )
                 .frame(minHeight: 72)
             }
 
@@ -1878,32 +2498,68 @@ struct RoleCardEditorView: View {
                 Text(uiStatic("有填時，需要主關鍵字 + 第二關鍵字同時命中才會觸發。"))
                     .font(.caption2)
                     .foregroundStyle(VNTheme.textSecondary.opacity(0.82))
-                TextEditor(text: Binding(
-                    get: { entry.wrappedValue.secondaryKeywords.joined(separator: ", ") },
-                    set: { entry.wrappedValue.secondaryKeywords = Self.parseLorebookTerms($0) }
-                ))
+                TextEditor(
+                    text: lorebookBinding(
+                        id: entryID,
+                        default: "",
+                        get: { $0.secondaryKeywords.joined(separator: ", ") },
+                        set: { $0.secondaryKeywords = Self.parseLorebookTerms($1) }
+                    )
+                )
                 .frame(minHeight: 72)
             }
 
             Stepper(
-                value: Binding(
-                    get: { LorebookEntry.clampedProbability(entry.wrappedValue.probability) },
-                    set: { entry.wrappedValue.probability = LorebookEntry.clampedProbability($0) }
+                value: lorebookBinding(
+                    id: entryID,
+                    default: 100,
+                    get: { LorebookEntry.clampedProbability($0.probability) },
+                    set: { $0.probability = LorebookEntry.clampedProbability($1) }
                 ),
                 in: 0...100,
                 step: 1
             ) {
-                Text(uiStatic("百分比啟用 \(LorebookEntry.clampedProbability(entry.wrappedValue.probability))%"))
+                Text(uiStatic("百分比啟用 \(probability)%"))
             }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(uiStatic("內容 (Content)"))
                     .font(.caption)
                     .foregroundStyle(VNTheme.textSecondary)
-                TextEditor(text: entry.content)
+                TextEditor(
+                    text: lorebookBinding(
+                        id: entryID,
+                        default: "",
+                        get: { $0.content },
+                        set: { $0.content = $1 }
+                    )
+                )
                     .frame(minHeight: 120)
             }
         }
+    }
+
+    private func lorebookEntry(id: String) -> LorebookEntry? {
+        card.lorebooks.first { $0.id == id }
+    }
+
+    private func lorebookBinding<Value>(
+        id: String,
+        default defaultValue: Value,
+        get: @escaping (LorebookEntry) -> Value,
+        set: @escaping (inout LorebookEntry, Value) -> Void
+    ) -> Binding<Value> {
+        Binding(
+            get: {
+                guard let entry = lorebookEntry(id: id) else { return defaultValue }
+                return get(entry)
+            },
+            set: { value in
+                card = Self.cardByUpdatingLorebook(card, lorebookID: id) { entry in
+                    set(&entry, value)
+                }
+            }
+        )
     }
 
     static func normalizedForSave(_ card: RoleCard) -> RoleCard {
@@ -1969,6 +2625,15 @@ struct RoleCardEditorView: View {
         return normalizedForSave(next)
     }
 
+    static func cardByUpdatingLorebook(_ card: RoleCard, lorebookID: String, update: (inout LorebookEntry) -> Void) -> RoleCard {
+        var next = card
+        guard let index = next.lorebooks.firstIndex(where: { $0.id == lorebookID }) else {
+            return normalizedForSave(next)
+        }
+        update(&next.lorebooks[index])
+        return normalizedForSave(next)
+    }
+
     static func lorebookSummaryTitle(_ entry: LorebookEntry, index: Int) -> String {
         let title = entry.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let probability = LorebookEntry.clampedProbability(entry.probability)
@@ -1980,6 +2645,10 @@ struct RoleCardEditorView: View {
             entry.enabled ? "" : "停用"
         ].filter { !$0.isEmpty }
         return parts.joined(separator: "｜")
+    }
+
+    static func lorebookIsExpanded(entryID: String, selectedLorebookID: String?) -> Bool {
+        entryID == selectedLorebookID
     }
 
     static func parseLorebookTerms(_ value: String) -> [String] {
@@ -2042,7 +2711,9 @@ struct RoleCardEditorView: View {
 
     private func selectLorebook(id: String) {
         guard card.lorebooks.contains(where: { $0.id == id }) else { return }
-        selectedLorebookId = id
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.9)) {
+            selectedLorebookId = id
+        }
     }
 
     private func toggleLorebookEnabled(id: String) {
@@ -4054,15 +4725,31 @@ struct TimeTrackingWordListEditor: View {
     }
 }
 
+enum SettingsImportTarget: Hashable {
+    case roleCard
+    case promptMode
+
+    var allowedContentTypes: [UTType] {
+        switch self {
+        case .roleCard:
+            [.json, .png, .jpeg]
+        case .promptMode:
+            [.json]
+        }
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var store: TimeTavernStore
-    @State private var showRoleJSONImporter = false
-    @State private var showModeJSONImporter = false
+    @State private var showDocumentImporter = false
+    @State private var activeImportTarget: SettingsImportTarget = .roleCard
     @State private var showRestoreDefaultsConfirm = false
 
     static let deepSeekMultiKeyHelp = "可加入多條 DeepSeek API key。主聊天會在已填 key 間輪流使用；Key 2+ 保留作處理/壓縮用途，對齊網頁端 CHAT_API_KEY2、DEEPSEEK_API_KEY2 的設計。"
     static let deepSeekCacheHitHelp = "DeepSeek 的 prompt cache 由服務端自動計算。當 system prompt、角色卡、壓縮內容等前綴保持穩定時，usage 可能回傳 Cache Hit / Cache Miss；AI Logs 會顯示命中率。不同 key 或帳號的 cache 統計可能不共用。"
     static let roleCardImportSymbolName = "person.crop.square"
+    static let usesSingleDocumentImporterForJSONImports = true
+    static let importButtonsUseFullRowHitArea = true
     static let uiLanguageHelp = "對齊網頁端簡繁轉換：只影響 app UI 顯示；不會改寫角色卡、Prompt、對話、AI logs 或匯入匯出的 JSON。"
     static let timeTrackingUsageHelp = [
         "配合詞與 +1天關鍵字在 5 字內時，會自動 +1 天，例如「現在第二天早上」。",
@@ -4190,19 +4877,19 @@ struct SettingsView: View {
                     )
                 }
                 Section(uiStatic("JSON / 圖片匯入")) {
-                    Button {
-                        showRoleJSONImporter = true
-                    } label: {
-                        Label(uiStatic("匯入角色卡 JSON / PNG / JPG"), systemImage: Self.roleCardImportSymbolName)
-                    }
+                    importButton(
+                        title: uiStatic("匯入角色卡 JSON / PNG / JPG"),
+                        systemImage: Self.roleCardImportSymbolName,
+                        target: .roleCard
+                    )
                     Text(uiStatic("支援網頁端 JSON、SillyTavern chara_card_v2，以及含角色卡 metadata 的 PNG/JPG。"))
                         .font(.caption)
                         .foregroundStyle(VNTheme.textSecondary)
-                    Button {
-                        showModeJSONImporter = true
-                    } label: {
-                        Label(uiStatic("匯入模式 JSON"), systemImage: "slider.horizontal.below.square.filled.and.square")
-                    }
+                    importButton(
+                        title: uiStatic("匯入模式 JSON"),
+                        systemImage: "slider.horizontal.below.square.filled.and.square",
+                        target: .promptMode
+                    )
                 }
                 Section(uiStatic("預設")) {
                     if let localDefaults = store.state.localDefaults {
@@ -4243,19 +4930,11 @@ struct SettingsView: View {
                     store.persist()
                 }
             }
-            .fileImporter(isPresented: $showRoleJSONImporter, allowedContentTypes: [.json, .png, .jpeg]) { result in
-                if case let .success(url) = result {
-                    _ = url.startAccessingSecurityScopedResource()
-                    store.importRoleCardFile(url: url)
-                    url.stopAccessingSecurityScopedResource()
-                }
-            }
-            .fileImporter(isPresented: $showModeJSONImporter, allowedContentTypes: [.json]) { result in
-                if case let .success(url) = result {
-                    _ = url.startAccessingSecurityScopedResource()
-                    store.importPromptModeJSON(url: url)
-                    url.stopAccessingSecurityScopedResource()
-                }
+            .fileImporter(
+                isPresented: $showDocumentImporter,
+                allowedContentTypes: activeImportTarget.allowedContentTypes
+            ) { result in
+                handleImportResult(result, target: activeImportTarget)
             }
             .alert(uiStatic("還原預設？"), isPresented: $showRestoreDefaultsConfirm) {
                 Button(uiStatic("取消"), role: .cancel) {}
@@ -4272,8 +4951,44 @@ struct SettingsView: View {
         UIChineseTextConverter.convert(text, language: language)
     }
 
+    static func shouldShowImporter(afterStarting target: SettingsImportTarget) -> Bool {
+        !target.allowedContentTypes.isEmpty
+    }
+
     private func ui(_ text: String) -> String {
         Self.localizedDisplayText(text, language: store.state.uiLanguage)
+    }
+
+    private func importButton(title: String, systemImage: String, target: SettingsImportTarget) -> some View {
+        Button {
+            activeImportTarget = target
+            showDocumentImporter = Self.shouldShowImporter(afterStarting: target)
+        } label: {
+            HStack(spacing: 12) {
+                Label(title, systemImage: systemImage)
+                    .labelStyle(.titleAndIcon)
+                Spacer(minLength: 12)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(VNTheme.textSecondary.opacity(0.72))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+    }
+
+    private func handleImportResult(_ result: Result<URL, Error>, target: SettingsImportTarget) {
+        guard case let .success(url) = result else { return }
+        _ = url.startAccessingSecurityScopedResource()
+        defer { url.stopAccessingSecurityScopedResource() }
+        switch target {
+        case .roleCard:
+            store.importRoleCardFile(url: url)
+        case .promptMode:
+            store.importPromptModeJSON(url: url)
+        }
     }
 
     private func processingKeyBinding(_ index: Int) -> Binding<String> {

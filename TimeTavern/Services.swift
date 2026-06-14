@@ -1,4 +1,5 @@
 import Foundation
+import Compression
 import Security
 import SwiftData
 
@@ -524,7 +525,7 @@ final class NovelAIClient {
             request.httpBody = try JSONEncoder().encode(payload)
             let (data, response) = try await session.data(for: request)
             try validateHTTP(response, data: data)
-            results.append(contentsOf: try extractImages(
+            results.append(contentsOf: try Self.extractImages(
                 fromImageResponseData: data,
                 prompt: prompt,
                 negativePrompt: studioSettings.negativePrompt,
@@ -1066,7 +1067,7 @@ final class NovelAIClient {
         String(format: "%.1f", (value * 10).rounded() / 10)
     }
 
-    private func extractImages(fromImageResponseData data: Data, prompt: String, negativePrompt: String, model: String) throws -> [NovelAIAlbumItem] {
+    static func extractImages(fromImageResponseData data: Data, prompt: String, negativePrompt: String, model: String) throws -> [NovelAIAlbumItem] {
         if let imageType = Self.detectImageType(in: data) {
             return [
                 NovelAIAlbumItem(
@@ -1080,23 +1081,268 @@ final class NovelAIClient {
                 )
             ]
         }
+
+        if Self.looksLikeZip(data) {
+            let items = try Self.extractImagesFromZip(
+                data,
+                prompt: prompt,
+                negativePrompt: negativePrompt,
+                model: model
+            )
+            if !items.isEmpty {
+                return items
+            }
+            throw TimeTavernError.network("NovelAI ZIP 沒有包含可用圖片。")
+        }
+
+        let jsonItems = Self.extractImagesFromJSON(
+            data,
+            prompt: prompt,
+            negativePrompt: negativePrompt,
+            model: model
+        )
+        if !jsonItems.isEmpty {
+            return jsonItems
+        }
+
         throw TimeTavernError.network("NovelAI 沒有回傳可用圖片。")
     }
 
     private static func detectImageType(in data: Data) -> (mimeType: String, fileExtension: String)? {
-        guard data.count >= 12 else { return nil }
-        if data.starts(with: [0x89, 0x50, 0x4E, 0x47]) {
+        guard data.count >= 3 else { return nil }
+        if data.count >= 4, data.starts(with: [0x89, 0x50, 0x4E, 0x47]) {
             return ("image/png", "png")
         }
         if data.starts(with: [0xFF, 0xD8, 0xFF]) {
             return ("image/jpeg", "jpg")
         }
+        guard data.count >= 12 else { return nil }
         let riff = String(data: data.prefix(4), encoding: .ascii)
         let webp = String(data: data.dropFirst(8).prefix(4), encoding: .ascii)
         if riff == "RIFF", webp == "WEBP" {
             return ("image/webp", "webp")
         }
         return nil
+    }
+
+    private static func extractImagesFromZip(
+        _ data: Data,
+        prompt: String,
+        negativePrompt: String,
+        model: String
+    ) throws -> [NovelAIAlbumItem] {
+        try extractZipEntries(from: data).enumerated().compactMap { index, entry in
+            guard let imageType = detectImageType(in: entry.data) ?? imageTypeFromFileName(entry.fileName) else {
+                return nil
+            }
+            return NovelAIAlbumItem(
+                fileName: imageFileName(entry.fileName, fallbackIndex: index, fileExtension: imageType.fileExtension),
+                mimeType: imageType.mimeType,
+                prompt: prompt,
+                negativePrompt: negativePrompt,
+                model: model,
+                imageData: entry.data,
+                metadata: "{}"
+            )
+        }
+    }
+
+    private static func extractImagesFromJSON(
+        _ data: Data,
+        prompt: String,
+        negativePrompt: String,
+        model: String
+    ) -> [NovelAIAlbumItem] {
+        guard let object = try? JSONSerialization.jsonObject(with: data) else { return [] }
+        var candidates: [String] = []
+        collectImageStrings(from: object, into: &candidates)
+        return candidates.enumerated().compactMap { index, value in
+            guard let image = decodeImageString(value) else { return nil }
+            return NovelAIAlbumItem(
+                fileName: "novelai-\(index + 1).\(image.imageType.fileExtension)",
+                mimeType: image.imageType.mimeType,
+                prompt: prompt,
+                negativePrompt: negativePrompt,
+                model: model,
+                imageData: image.data,
+                metadata: "{}"
+            )
+        }
+    }
+
+    private static func collectImageStrings(from object: Any, into output: inout [String]) {
+        guard output.count < 50 else { return }
+        if let string = object as? String {
+            output.append(string)
+            return
+        }
+        if let array = object as? [Any] {
+            for item in array {
+                collectImageStrings(from: item, into: &output)
+            }
+            return
+        }
+        guard let dictionary = object as? [String: Any] else { return }
+        for value in dictionary.values {
+            collectImageStrings(from: value, into: &output)
+        }
+    }
+
+    private static func decodeImageString(_ value: String) -> (data: Data, imageType: (mimeType: String, fileExtension: String))? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base64: String
+        if trimmed.hasPrefix("data:image/"), let comma = trimmed.firstIndex(of: ",") {
+            base64 = String(trimmed[trimmed.index(after: comma)...])
+        } else {
+            base64 = trimmed
+        }
+        guard let data = Data(base64Encoded: base64, options: [.ignoreUnknownCharacters]),
+              let imageType = detectImageType(in: data) else {
+            return nil
+        }
+        return (data, imageType)
+    }
+
+    private struct ZipEntry {
+        var fileName: String
+        var data: Data
+    }
+
+    private static func looksLikeZip(_ data: Data) -> Bool {
+        data.count >= 4 && data.starts(with: [0x50, 0x4B, 0x03, 0x04])
+    }
+
+    private static func extractZipEntries(from data: Data) throws -> [ZipEntry] {
+        guard let endOffset = findZipEndOfCentralDirectory(in: data),
+              let totalEntries = data.littleEndianUInt16(at: endOffset + 10),
+              let centralDirectoryOffset = data.littleEndianUInt32(at: endOffset + 16) else {
+            throw TimeTavernError.network("NovelAI 回傳內容不是有效 ZIP。")
+        }
+
+        var entries: [ZipEntry] = []
+        var offset = Int(centralDirectoryOffset)
+        for _ in 0..<Int(totalEntries) {
+            guard offset + 46 <= data.count,
+                  data.littleEndianUInt32(at: offset) == 0x0201_4B50,
+                  let method = data.littleEndianUInt16(at: offset + 10),
+                  let compressedSizeValue = data.littleEndianUInt32(at: offset + 20),
+                  let uncompressedSizeValue = data.littleEndianUInt32(at: offset + 24),
+                  let fileNameLengthValue = data.littleEndianUInt16(at: offset + 28),
+                  let extraLengthValue = data.littleEndianUInt16(at: offset + 30),
+                  let commentLengthValue = data.littleEndianUInt16(at: offset + 32),
+                  let localHeaderOffsetValue = data.littleEndianUInt32(at: offset + 42) else {
+                break
+            }
+
+            let compressedSize = Int(compressedSizeValue)
+            let uncompressedSize = Int(uncompressedSizeValue)
+            let fileNameLength = Int(fileNameLengthValue)
+            let extraLength = Int(extraLengthValue)
+            let commentLength = Int(commentLengthValue)
+            let nameStart = offset + 46
+            guard let fileNameData = data.safeSubdata(offset: nameStart, count: fileNameLength) else {
+                break
+            }
+            let fileName = String(data: fileNameData, encoding: .utf8) ?? ""
+            let localHeaderOffset = Int(localHeaderOffsetValue)
+            if let entry = try extractZipEntry(
+                data: data,
+                fileName: fileName,
+                localHeaderOffset: localHeaderOffset,
+                compressedSize: compressedSize,
+                uncompressedSize: uncompressedSize,
+                method: method
+            ) {
+                entries.append(entry)
+            }
+            offset += 46 + fileNameLength + extraLength + commentLength
+        }
+        return entries
+    }
+
+    private static func extractZipEntry(
+        data: Data,
+        fileName: String,
+        localHeaderOffset: Int,
+        compressedSize: Int,
+        uncompressedSize: Int,
+        method: UInt16
+    ) throws -> ZipEntry? {
+        guard localHeaderOffset + 30 <= data.count,
+              data.littleEndianUInt32(at: localHeaderOffset) == 0x0403_4B50,
+              let localNameLength = data.littleEndianUInt16(at: localHeaderOffset + 26),
+              let localExtraLength = data.littleEndianUInt16(at: localHeaderOffset + 28) else {
+            return nil
+        }
+        let dataStart = localHeaderOffset + 30 + Int(localNameLength) + Int(localExtraLength)
+        guard let compressedData = data.safeSubdata(offset: dataStart, count: compressedSize) else {
+            return nil
+        }
+
+        let output: Data
+        switch method {
+        case 0:
+            output = uncompressedSize > 0 && compressedData.count > uncompressedSize
+                ? compressedData.prefixData(uncompressedSize)
+                : compressedData
+        case 8:
+            output = try inflateRawDeflate(compressedData, expectedSize: uncompressedSize)
+        default:
+            return nil
+        }
+
+        return ZipEntry(fileName: fileName, data: output)
+    }
+
+    private static func findZipEndOfCentralDirectory(in data: Data) -> Int? {
+        guard data.count >= 22 else { return nil }
+        let lowerBound = max(0, data.count - 66_000)
+        var offset = data.count - 22
+        while offset >= lowerBound {
+            if data.littleEndianUInt32(at: offset) == 0x0605_4B50 {
+                return offset
+            }
+            offset -= 1
+        }
+        return nil
+    }
+
+    private static func inflateRawDeflate(_ data: Data, expectedSize: Int) throws -> Data {
+        var outputSize = max(expectedSize, data.count * 4, 1024)
+        for _ in 0..<8 {
+            var output = [UInt8](repeating: 0, count: outputSize)
+            let decodedSize = data.withUnsafeBytes { sourceRawBuffer -> Int in
+                guard let source = sourceRawBuffer.bindMemory(to: UInt8.self).baseAddress else { return 0 }
+                return compression_decode_buffer(
+                    &output,
+                    output.count,
+                    source,
+                    data.count,
+                    nil,
+                    COMPRESSION_ZLIB
+                )
+            }
+            if decodedSize > 0 {
+                return Data(output.prefix(expectedSize > 0 ? min(decodedSize, expectedSize) : decodedSize))
+            }
+            outputSize *= 2
+        }
+        throw TimeTavernError.network("NovelAI ZIP 圖片解壓失敗。")
+    }
+
+    private static func imageTypeFromFileName(_ fileName: String) -> (mimeType: String, fileExtension: String)? {
+        switch fileName.split(separator: ".").last?.lowercased() {
+        case "png": return ("image/png", "png")
+        case "jpg", "jpeg": return ("image/jpeg", "jpg")
+        case "webp": return ("image/webp", "webp")
+        default: return nil
+        }
+    }
+
+    private static func imageFileName(_ fileName: String, fallbackIndex: Int, fileExtension: String) -> String {
+        let lastComponent = fileName.split(separator: "/").last.map(String.init) ?? ""
+        let trimmed = lastComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "novelai-\(fallbackIndex + 1).\(fileExtension)" : trimmed
     }
 
     private func validateHTTP(_ response: URLResponse, data: Data = Data()) throws {
@@ -1229,5 +1475,36 @@ struct NovelAIParameters: Encodable {
         case fixedPromptSnippets = "fixed_prompt_snippets"
         case randomPrompt = "random_prompt"
         case randomPromptSnippets = "random_prompt_snippets"
+    }
+}
+
+private extension Data {
+    func littleEndianUInt16(at offset: Int) -> UInt16? {
+        guard offset >= 0, offset + 1 < count else { return nil }
+        let start = index(startIndex, offsetBy: offset)
+        let next = index(after: start)
+        return UInt16(self[start]) | (UInt16(self[next]) << 8)
+    }
+
+    func littleEndianUInt32(at offset: Int) -> UInt32? {
+        guard offset >= 0, offset + 3 < count else { return nil }
+        let start = index(startIndex, offsetBy: offset)
+        let byte1 = self[start]
+        let byte2 = self[index(start, offsetBy: 1)]
+        let byte3 = self[index(start, offsetBy: 2)]
+        let byte4 = self[index(start, offsetBy: 3)]
+        return UInt32(byte1) |
+            (UInt32(byte2) << 8) |
+            (UInt32(byte3) << 16) |
+            (UInt32(byte4) << 24)
+    }
+
+    func safeSubdata(offset: Int, count requestedCount: Int) -> Data? {
+        guard offset >= 0, requestedCount >= 0, offset + requestedCount <= count else { return nil }
+        return subdata(in: offset..<(offset + requestedCount))
+    }
+
+    func prefixData(_ length: Int) -> Data {
+        Data(prefix(Swift.max(0, length)))
     }
 }

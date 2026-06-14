@@ -7,8 +7,11 @@ private final class StreamingAssistantMessageUpdater {
     private let assistantID: String
     private var contentBuffer = ""
     private var reasoningBuffer = ""
+    private var contentCharacterCount = 0
+    private var reasoningCharacterCount = 0
+    private var lastFlushedContentCharacterCount = 0
+    private var lastFlushedReasoningCharacterCount = 0
     private var didStartContent = false
-    private var flushTask: Task<Void, Never>?
 
     init(store: TimeTavernStore, assistantID: String) {
         self.store = store
@@ -20,47 +23,55 @@ private final class StreamingAssistantMessageUpdater {
         case .reasoning:
             guard !didStartContent else { return }
             reasoningBuffer += delta.text
-            scheduleFlush()
+            reasoningCharacterCount += delta.text.count
+            if TimeTavernStore.shouldFlushStreamingUI(
+                currentCharacterCount: reasoningCharacterCount,
+                lastFlushedCharacterCount: lastFlushedReasoningCharacterCount
+            ) {
+                flush()
+            }
         case .content:
             let isFirstContent = !didStartContent
             didStartContent = true
-            reasoningBuffer = ""
-            contentBuffer += delta.text
             if isFirstContent {
+                reasoningBuffer = ""
+                reasoningCharacterCount = 0
+                lastFlushedReasoningCharacterCount = 0
+            }
+            contentBuffer += delta.text
+            contentCharacterCount += delta.text.count
+            if TimeTavernStore.shouldFlushStreamingUI(
+                currentCharacterCount: contentCharacterCount,
+                lastFlushedCharacterCount: lastFlushedContentCharacterCount,
+                force: isFirstContent
+            ) {
                 flush()
-            } else {
-                scheduleFlush()
             }
         }
     }
 
     func finish(content: String) {
-        flushTask?.cancel()
-        flushTask = nil
         contentBuffer = content
+        contentCharacterCount = content.count
         didStartContent = true
         reasoningBuffer = ""
-        flush()
+        reasoningCharacterCount = 0
+        lastFlushedReasoningCharacterCount = 0
+        flush(force: true)
     }
 
-    private func scheduleFlush() {
-        guard flushTask == nil else { return }
-        flushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: TimeTavernStore.streamingUIFlushIntervalNanoseconds)
-            self?.flush()
-        }
-    }
-
-    private func flush() {
-        flushTask?.cancel()
-        flushTask = nil
+    private func flush(force: Bool = false) {
         if didStartContent {
+            guard force || contentCharacterCount != lastFlushedContentCharacterCount else { return }
+            lastFlushedContentCharacterCount = contentCharacterCount
             store?.updateStreamingAssistantMessage(
                 assistantID: assistantID,
                 content: contentBuffer,
                 reasoningPreview: ""
             )
         } else {
+            guard force || reasoningCharacterCount != lastFlushedReasoningCharacterCount else { return }
+            lastFlushedReasoningCharacterCount = reasoningCharacterCount
             store?.updateStreamingAssistantMessage(
                 assistantID: assistantID,
                 content: nil,
@@ -94,7 +105,7 @@ final class TimeTavernStore: ObservableObject {
     private var novelAIGenerationTask: Task<Void, Never>?
     private var deepSeekChatKeyCursor = 0
     static let compressionJSONMaxAttempts = 2
-    static let streamingUIFlushIntervalNanoseconds: UInt64 = 60_000_000
+    nonisolated static let streamingUIFlushCharacterThreshold = 100
 
     private struct CompressionPhaseResult {
         var completed: Int = 0
@@ -105,6 +116,15 @@ final class TimeTavernStore: ObservableObject {
 
     nonisolated static func shouldMarkCompressionNotice(completedProfileIDs: [String]) -> Bool {
         completedProfileIDs.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines) == "standard" }
+    }
+
+    nonisolated static func shouldFlushStreamingUI(
+        currentCharacterCount: Int,
+        lastFlushedCharacterCount: Int,
+        force: Bool = false
+    ) -> Bool {
+        if force { return true }
+        return max(0, currentCharacterCount - lastFlushedCharacterCount) >= streamingUIFlushCharacterThreshold
     }
 
     func attach(modelContext: ModelContext) {
