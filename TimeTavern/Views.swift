@@ -571,6 +571,8 @@ struct ChatView: View {
     @State private var editText = ""
     @State private var showRegenerateConfirmation = false
     @State private var previewImage: ImagePreviewItem?
+    @State private var didInitialScrollToCurrent = false
+    @State private var scrollRequest: ChatScrollRequest?
     @FocusState private var composerFocused: Bool
 
     static func shouldDismissComposerOnOutsideTap(isFocused: Bool) -> Bool {
@@ -578,6 +580,12 @@ struct ChatView: View {
     }
     static let composerBottomPadding: CGFloat = 16
     static let requiresRegenerateConfirmation = true
+    static let opensAtCurrentConversationPosition = true
+
+    static func initialScrollDestination(conversationIsEmpty: Bool, hasPerformedInitialScroll: Bool) -> ChatScrollDestination? {
+        guard !conversationIsEmpty, !hasPerformedInitialScroll else { return nil }
+        return .current
+    }
 
     var body: some View {
         NavigationStack {
@@ -640,6 +648,20 @@ struct ChatView: View {
                                     withAnimation { proxy.scrollTo(last, anchor: .bottom) }
                                 }
                             }
+                            .onChange(of: scrollRequest) { _, request in
+                                guard let request else { return }
+                                scroll(to: request.destination, proxy: proxy, animated: true)
+                            }
+                            .onAppear {
+                                guard let destination = Self.initialScrollDestination(
+                                    conversationIsEmpty: store.state.conversation.isEmpty,
+                                    hasPerformedInitialScroll: didInitialScrollToCurrent
+                                ) else { return }
+                                didInitialScrollToCurrent = true
+                                DispatchQueue.main.async {
+                                    scroll(to: destination, proxy: proxy, animated: false)
+                                }
+                            }
                             .scrollDismissesKeyboard(.interactively)
                         }
                         if store.state.conversation.isEmpty {
@@ -652,7 +674,11 @@ struct ChatView: View {
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { _ in dismissComposerInput() })
 
-                    VisualNovelComposer(inputFocused: $composerFocused)
+                    VisualNovelComposer(
+                        inputFocused: $composerFocused,
+                        scrollToStart: { requestScroll(.start) },
+                        scrollToCurrent: { requestScroll(.current) }
+                    )
                         .padding(.horizontal, 16)
                         .padding(.bottom, Self.composerBottomPadding)
                 }
@@ -725,6 +751,43 @@ struct ChatView: View {
         guard Self.shouldDismissComposerOnOutsideTap(isFocused: composerFocused) else { return }
         composerFocused = false
     }
+
+    private func requestScroll(_ destination: ChatScrollDestination) {
+        dismissComposerInput()
+        scrollRequest = ChatScrollRequest(destination: destination)
+    }
+
+    private func scroll(to destination: ChatScrollDestination, proxy: ScrollViewProxy, animated: Bool) {
+        guard let targetID = destination.targetID(in: store.state.conversation) else { return }
+        let anchor: UnitPoint = destination == .start ? .top : .bottom
+        let action = {
+            proxy.scrollTo(targetID, anchor: anchor)
+        }
+        if animated {
+            withAnimation(.easeInOut(duration: 0.28), action)
+        } else {
+            action()
+        }
+    }
+}
+
+enum ChatScrollDestination: String, Equatable {
+    case start
+    case current
+
+    func targetID(in conversation: [ConversationMessage]) -> String? {
+        switch self {
+        case .start:
+            conversation.first?.id
+        case .current:
+            conversation.last?.id
+        }
+    }
+}
+
+struct ChatScrollRequest: Equatable {
+    var id = UUID()
+    var destination: ChatScrollDestination
 }
 
 struct ChatSceneHeader: View {
@@ -1629,12 +1692,19 @@ enum MessageMarkupRenderer {
 struct VisualNovelComposer: View {
     @EnvironmentObject private var store: TimeTavernStore
     @FocusState.Binding var inputFocused: Bool
+    var scrollToStart: () -> Void = {}
+    var scrollToCurrent: () -> Void = {}
     static let showsPlusInsertMenu = true
     static let quickInsertItems: [ComposerInsertItem] = [
         ComposerInsertItem(title: "繼續", text: "｛繼續｝", systemImage: "arrow.forward.circle"),
         ComposerInsertItem(title: "動作括號", text: "（）", systemImage: "textformat"),
         ComposerInsertItem(title: "推進場景", text: "｛推进剧情到下一个场景｝", systemImage: "arrow.right"),
         ComposerInsertItem(title: "時間流逝", text: "｛时间流逝——｝", systemImage: "clock")
+    ]
+    static let showsScrollTeleportActions = true
+    static let quickScrollItems: [ComposerScrollItem] = [
+        ComposerScrollItem(title: "回到最開始", destination: .start, systemImage: "arrow.up"),
+        ComposerScrollItem(title: "回到現狀", destination: .current, systemImage: "arrow.down")
     ]
     static let slashCommandItems: [ComposerInsertItem] = [
         ComposerInsertItem(title: "開始對話", text: "/ai_start", systemImage: "play.fill"),
@@ -1671,6 +1741,16 @@ struct VisualNovelComposer: View {
                         } label: {
                             Label(item.title, systemImage: item.systemImage)
                         }
+                    }
+                }
+                Section(uiStatic("快速跳轉")) {
+                    ForEach(Self.quickScrollItems) { item in
+                        Button {
+                            jump(to: item.destination)
+                        } label: {
+                            Label(item.title, systemImage: item.systemImage)
+                        }
+                        .disabled(store.state.conversation.isEmpty)
                     }
                 }
                 Section(uiStatic("/ 指令")) {
@@ -1756,6 +1836,16 @@ struct VisualNovelComposer: View {
         inputFocused = true
     }
 
+    private func jump(to destination: ChatScrollDestination) {
+        inputFocused = false
+        switch destination {
+        case .start:
+            scrollToStart()
+        case .current:
+            scrollToCurrent()
+        }
+    }
+
     static func composerTextByInserting(current: String, insertion: String) -> String {
         if current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return insertion
@@ -1774,15 +1864,27 @@ struct ComposerInsertItem: Identifiable, Hashable {
     var id: String { text }
 }
 
+struct ComposerScrollItem: Identifiable, Hashable {
+    var title: String
+    var destination: ChatScrollDestination
+    var systemImage: String
+    var id: String { destination.rawValue }
+}
+
 struct CharactersView: View {
     @EnvironmentObject private var store: TimeTavernStore
     @State private var editingCard: RoleCard?
+    @State private var editingAssistantCard: AssistantCard?
     @State private var roleCardPendingDelete: RoleCard?
-    @State private var showAssistantPromptEditor = false
+    @State private var assistantCardPendingDelete: AssistantCard?
+    @State private var showRoleCardImporter = false
     @State private var query = ""
     static let separatesRoleCardsAndAssistantCards = true
     static let exposesRoleCardDeleteAction = true
     static let confirmsRoleCardDeletion = true
+    static let supportsCustomAssistantCards = true
+    static let exposesRoleCardImportAction = true
+    static let roleCardImportSymbolName = "person.crop.square"
 
     var filteredCards: [RoleCard] {
         guard !query.isEmpty else { return store.state.roleCards }
@@ -1800,6 +1902,17 @@ struct CharactersView: View {
         )
     }
 
+    private var assistantDeleteConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { assistantCardPendingDelete != nil },
+            set: { isPresented in
+                if !isPresented {
+                    assistantCardPendingDelete = nil
+                }
+            }
+        )
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -1810,14 +1923,28 @@ struct CharactersView: View {
                     } label: {
                         Label(uiStatic("建立角色卡"), systemImage: "plus")
                     }
+                    Button {
+                        showRoleCardImporter = true
+                    } label: {
+                        Label(uiStatic("匯入角色卡 JSON / PNG / JPG"), systemImage: Self.roleCardImportSymbolName)
+                    }
+                    Text(uiStatic("支援網頁端 JSON、SillyTavern chara_card_v2，以及含角色卡 metadata 的 PNG/JPG。"))
+                        .font(.caption)
+                        .foregroundStyle(VNTheme.textSecondary)
                 }
                 Section(uiStatic("助手卡")) {
-                    ForEach(AssistantCard.allCards) { assistantCard in
+                    Button {
+                        editingAssistantCard = store.createAssistantCard()
+                    } label: {
+                        Label(uiStatic("建立新助手"), systemImage: "plus")
+                    }
+                    ForEach(store.state.assistantCards) { assistantCard in
                         AssistantCardListItem(
                             assistantCard: assistantCard,
                             isActive: store.state.activeAssistantMode == assistantCard.id,
                             onStart: { store.start(assistantCard: assistantCard) },
-                            onEditPrompt: { showAssistantPromptEditor = true }
+                            onEdit: { editingAssistantCard = assistantCard },
+                            onDelete: assistantCard.locked ? nil : { assistantCardPendingDelete = assistantCard }
                         )
                     }
                 }
@@ -1839,15 +1966,23 @@ struct CharactersView: View {
                         .onDelete(perform: deleteFilteredRoleCards)
                     }
                 }
+                if !store.statusText.isEmpty {
+                    Section(uiStatic("狀態")) {
+                        Text(store.statusText)
+                    }
+                }
             }
             .visualNovelListChrome()
             .searchable(text: $query, prompt: uiStatic("搜尋角色"))
             .navigationTitle(uiStatic("角色"))
+            .fileImporter(isPresented: $showRoleCardImporter, allowedContentTypes: AppImportTarget.roleCard.allowedContentTypes) { result in
+                handleRoleCardImportResult(result)
+            }
             .sheet(item: $editingCard) { card in
                 RoleCardEditorView(card: card)
             }
-            .sheet(isPresented: $showAssistantPromptEditor) {
-                AssistantPromptEditorView()
+            .sheet(item: $editingAssistantCard) { assistantCard in
+                AssistantPromptEditorView(assistantCard: assistantCard)
             }
             .confirmationDialog(
                 uiStatic("刪除角色卡？"),
@@ -1861,6 +1996,20 @@ struct CharactersView: View {
                 Button(uiStatic("取消"), role: .cancel) {}
             } message: { card in
                 Text(uiStatic("會刪除「\(card.name.isEmpty ? "未命名角色" : card.name)」。如果這是目前角色卡，也會停止啟用。"))
+            }
+            .confirmationDialog(
+                uiStatic("刪除助手卡？"),
+                isPresented: assistantDeleteConfirmationPresented,
+                titleVisibility: .visible,
+                presenting: assistantCardPendingDelete
+            ) { assistantCard in
+                Button(uiStatic("刪除"), role: .destructive) {
+                    deleteAssistantCard(assistantCard)
+                }
+                Button(uiStatic("取消"), role: .cancel) {}
+            } message: { assistantCard in
+                let suffix = store.state.activeAssistantMode == assistantCard.id ? uiStatic("目前對話會一併重置。") : ""
+                Text(uiStatic("確定要刪除助手「\(assistantCard.displayName)」嗎？\(suffix)"))
             }
         }
     }
@@ -1885,13 +2034,29 @@ struct CharactersView: View {
         store.deleteRoleCards(at: IndexSet(integer: index))
         roleCardPendingDelete = nil
     }
+
+    private func deleteAssistantCard(_ assistantCard: AssistantCard) {
+        if editingAssistantCard?.id == assistantCard.id {
+            editingAssistantCard = nil
+        }
+        store.deleteAssistantCard(assistantCard)
+        assistantCardPendingDelete = nil
+    }
+
+    private func handleRoleCardImportResult(_ result: Result<URL, Error>) {
+        guard case let .success(url) = result else { return }
+        _ = url.startAccessingSecurityScopedResource()
+        defer { url.stopAccessingSecurityScopedResource() }
+        store.importRoleCardFile(url: url)
+    }
 }
 
 struct AssistantCardListItem: View {
     var assistantCard: AssistantCard
     var isActive: Bool
     var onStart: () -> Void
-    var onEditPrompt: () -> Void
+    var onEdit: () -> Void
+    var onDelete: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -1900,12 +2065,19 @@ struct AssistantCardListItem: View {
                 Button {
                     onStart()
                 } label: {
-                    Label(uiStatic("啟用助手"), systemImage: "play.fill")
+                    Label(uiStatic("啟用助手並重置"), systemImage: "play.fill")
                 }
                 Button {
-                    onEditPrompt()
+                    onEdit()
                 } label: {
-                    Label(uiStatic("編輯 Prompt"), systemImage: "square.and.pencil")
+                    Label(uiStatic("編輯"), systemImage: "square.and.pencil")
+                }
+                if let onDelete {
+                    Button(role: .destructive) {
+                        onDelete()
+                    } label: {
+                        Label(uiStatic("刪除"), systemImage: "trash")
+                    }
                 }
             }
             .font(.caption.weight(.semibold))
@@ -1913,11 +2085,25 @@ struct AssistantCardListItem: View {
         }
         .swipeActions {
             Button(uiStatic("啟用")) { onStart() }.tint(VNTheme.accent)
-            Button("Prompt") { onEditPrompt() }.tint(Color(red: 0.36, green: 0.42, blue: 1.0))
+            Button(uiStatic("編輯")) { onEdit() }.tint(Color(red: 0.36, green: 0.42, blue: 1.0))
+            if let onDelete {
+                Button(role: .destructive) { onDelete() } label: {
+                    Text(uiStatic("刪除"))
+                }
+                .tint(.red)
+            }
         }
         .contextMenu {
-            Button(uiStatic("啟用助手")) { onStart() }
-            Button(uiStatic("編輯助手 Prompt")) { onEditPrompt() }
+            Button(uiStatic("啟用助手並重置")) { onStart() }
+            Button(uiStatic("編輯助手卡")) { onEdit() }
+            if let onDelete {
+                Button(role: .destructive) { onDelete() } label: {
+                    Label(uiStatic("刪除"), systemImage: "trash")
+                }
+            }
+        }
+        .onTapGesture {
+            onEdit()
         }
     }
 }
@@ -1999,6 +2185,14 @@ struct AssistantCardRow: View {
                     .foregroundStyle(VNTheme.textSecondary)
             }
             Spacer()
+            if assistantCard.locked {
+                Text(uiStatic("內建"))
+                    .font(.caption2.weight(.bold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(VNTheme.accent.opacity(0.18)))
+                    .foregroundStyle(VNTheme.accentSoft)
+            }
             if isActive {
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(VNTheme.accentSoft)
             }
@@ -2010,32 +2204,57 @@ struct AssistantCardRow: View {
 struct AssistantPromptEditorView: View {
     @EnvironmentObject private var store: TimeTavernStore
     @Environment(\.dismiss) private var dismiss
+    @State private var draft: AssistantCard
+    static let exposesAssistantNameDescriptionPromptFields = true
+
+    init(assistantCard: AssistantCard) {
+        _draft = State(initialValue: assistantCard)
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section(uiStatic("建立卡助手 Prompt")) {
-                    Text(uiStatic("這會更新建立卡助手使用的 system prompt，保存後立即生效。可使用 {{user}} 代表稱呼，{{chur}} 代表助手卡名稱。"))
+                Section(uiStatic("助手資料")) {
+                    TextField(uiStatic("助手名稱"), text: $draft.name)
+                    TextEditor(text: $draft.description)
+                        .frame(minHeight: 84)
+                        .overlay(alignment: .topLeading) {
+                            if draft.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text(uiStatic("簡介"))
+                                    .foregroundStyle(VNTheme.textSecondary)
+                                    .padding(.top, 8)
+                                    .padding(.leading, 5)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                    if draft.locked {
+                        Text(uiStatic("內建助手卡可以編輯名稱、簡介與 Prompt，但不能刪除。"))
+                            .font(.caption)
+                            .foregroundStyle(VNTheme.textSecondary)
+                    }
+                }
+                Section(uiStatic("Prompt")) {
+                    Text(uiStatic("保存後立即生效；助手卡不會混入使用者設定。可使用 {{user}} 代表稱呼，{{chur}} 代表助手卡名稱。"))
                         .font(.caption)
                         .foregroundStyle(VNTheme.textSecondary)
-                    TextEditor(text: $store.state.characterCardCreationAssistantPrompt)
+                    TextEditor(text: $draft.prompt)
                         .frame(minHeight: 260)
                 }
                 Section {
                     Button(uiStatic("還原預設 Prompt")) {
-                        store.resetCharacterCardCreationAssistantPrompt()
+                        draft.prompt = AssistantCard.defaultPrompt
                     }
                 }
             }
             .visualNovelListChrome()
-            .navigationTitle(uiStatic("助手 Prompt"))
+            .navigationTitle(draft.displayName)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(uiStatic("關閉")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(uiStatic("保存")) {
-                        store.persist()
+                        store.update(assistantCard: draft)
                         dismiss()
                     }
                 }
@@ -2118,6 +2337,7 @@ struct RoleCardEditorView: View {
     @State private var selectedLorebookId: String?
     @State private var coverPickerItem: PhotosPickerItem?
     @State private var coverCropDraft: RoleCardCoverCropDraft?
+    static let exposesCustomSectionImagePromptToggle = true
     static let lorebookEditorExpandsInline = true
     static let lorebookEditorUsesDetachedBottomPanel = false
     static let lorebookEditorUsesIDBasedBindings = true
@@ -2197,6 +2417,10 @@ struct RoleCardEditorView: View {
                             TextField(uiStatic("名稱"), text: $section.name)
                             TextEditor(text: $section.content).frame(minHeight: 90)
                             Toggle(uiStatic("啟用"), isOn: $section.enabled)
+                            Toggle(uiStatic("加入跑圖 Prompt"), isOn: $section.includeInImagePrompt)
+                            Text(uiStatic("只有欄位啟用且加入跑圖時，才會套入跑圖大模型的 NovelAI Base Prompt 生成。"))
+                                .font(.caption)
+                                .foregroundStyle(VNTheme.textSecondary)
                         }
                     }
                     Button(uiStatic("新增欄位")) { card.customSections.append(CustomSection(name: "新欄位")) }
@@ -3128,6 +3352,7 @@ struct PromptLabView: View {
     @EnvironmentObject private var store: TimeTavernStore
     @State private var showModeImporter = false
     static let showsCompressionQuickSection = false
+    static let exposesPromptModeImportAction = true
 
     var body: some View {
         List {
@@ -4725,7 +4950,7 @@ struct TimeTrackingWordListEditor: View {
     }
 }
 
-enum SettingsImportTarget: Hashable {
+enum AppImportTarget: Hashable {
     case roleCard
     case promptMode
 
@@ -4741,15 +4966,11 @@ enum SettingsImportTarget: Hashable {
 
 struct SettingsView: View {
     @EnvironmentObject private var store: TimeTavernStore
-    @State private var showDocumentImporter = false
-    @State private var activeImportTarget: SettingsImportTarget = .roleCard
     @State private var showRestoreDefaultsConfirm = false
 
     static let deepSeekMultiKeyHelp = "可加入多條 DeepSeek API key。主聊天會在已填 key 間輪流使用；Key 2+ 保留作處理/壓縮用途，對齊網頁端 CHAT_API_KEY2、DEEPSEEK_API_KEY2 的設計。"
     static let deepSeekCacheHitHelp = "DeepSeek 的 prompt cache 由服務端自動計算。當 system prompt、角色卡、壓縮內容等前綴保持穩定時，usage 可能回傳 Cache Hit / Cache Miss；AI Logs 會顯示命中率。不同 key 或帳號的 cache 統計可能不共用。"
-    static let roleCardImportSymbolName = "person.crop.square"
-    static let usesSingleDocumentImporterForJSONImports = true
-    static let importButtonsUseFullRowHitArea = true
+    static let exposesJSONImportActions = false
     static let uiLanguageHelp = "對齊網頁端簡繁轉換：只影響 app UI 顯示；不會改寫角色卡、Prompt、對話、AI logs 或匯入匯出的 JSON。"
     static let timeTrackingUsageHelp = [
         "配合詞與 +1天關鍵字在 5 字內時，會自動 +1 天，例如「現在第二天早上」。",
@@ -4876,28 +5097,13 @@ struct SettingsView: View {
                         text: wordListBinding(\.eveningWords)
                     )
                 }
-                Section(uiStatic("JSON / 圖片匯入")) {
-                    importButton(
-                        title: uiStatic("匯入角色卡 JSON / PNG / JPG"),
-                        systemImage: Self.roleCardImportSymbolName,
-                        target: .roleCard
-                    )
-                    Text(uiStatic("支援網頁端 JSON、SillyTavern chara_card_v2，以及含角色卡 metadata 的 PNG/JPG。"))
-                        .font(.caption)
-                        .foregroundStyle(VNTheme.textSecondary)
-                    importButton(
-                        title: uiStatic("匯入模式 JSON"),
-                        systemImage: "slider.horizontal.below.square.filled.and.square",
-                        target: .promptMode
-                    )
-                }
                 Section(uiStatic("預設")) {
                     if let localDefaults = store.state.localDefaults {
-                        Text(uiStatic("本機預設：\(localDefaults.roleCards.count) 張角色卡、\(localDefaults.promptModes.count) 個 Prompt 模式。"))
+                        Text(uiStatic("本機預設：\(localDefaults.roleCards.count) 張角色卡、\(localDefaults.assistantCards.count) 張助手卡、\(localDefaults.promptModes.count) 個 Prompt 模式。"))
                             .font(.caption)
                             .foregroundStyle(VNTheme.textSecondary)
                     } else if let summary = store.bundledWebDefaultsSummary() {
-                        Text(uiStatic("尚未保存本機預設。可回落網頁 bundle 預設：\(summary.roleCardCount) 張角色卡、\(summary.promptModeCount) 個 Prompt 模式。使用者：\(summary.userDisplayName)。"))
+                        Text(uiStatic("尚未保存本機預設。可回落網頁 bundle 預設：\(summary.roleCardCount) 張角色卡、\(summary.assistantCardCount) 張助手卡、\(summary.promptModeCount) 個 Prompt 模式。使用者：\(summary.userDisplayName)。"))
                             .font(.caption)
                             .foregroundStyle(VNTheme.textSecondary)
                     } else {
@@ -4930,12 +5136,6 @@ struct SettingsView: View {
                     store.persist()
                 }
             }
-            .fileImporter(
-                isPresented: $showDocumentImporter,
-                allowedContentTypes: activeImportTarget.allowedContentTypes
-            ) { result in
-                handleImportResult(result, target: activeImportTarget)
-            }
             .alert(uiStatic("還原預設？"), isPresented: $showRestoreDefaultsConfirm) {
                 Button(uiStatic("取消"), role: .cancel) {}
                 Button(uiStatic("還原"), role: .destructive) {
@@ -4951,44 +5151,8 @@ struct SettingsView: View {
         UIChineseTextConverter.convert(text, language: language)
     }
 
-    static func shouldShowImporter(afterStarting target: SettingsImportTarget) -> Bool {
-        !target.allowedContentTypes.isEmpty
-    }
-
     private func ui(_ text: String) -> String {
         Self.localizedDisplayText(text, language: store.state.uiLanguage)
-    }
-
-    private func importButton(title: String, systemImage: String, target: SettingsImportTarget) -> some View {
-        Button {
-            activeImportTarget = target
-            showDocumentImporter = Self.shouldShowImporter(afterStarting: target)
-        } label: {
-            HStack(spacing: 12) {
-                Label(title, systemImage: systemImage)
-                    .labelStyle(.titleAndIcon)
-                Spacer(minLength: 12)
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(VNTheme.textSecondary.opacity(0.72))
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-    }
-
-    private func handleImportResult(_ result: Result<URL, Error>, target: SettingsImportTarget) {
-        guard case let .success(url) = result else { return }
-        _ = url.startAccessingSecurityScopedResource()
-        defer { url.stopAccessingSecurityScopedResource() }
-        switch target {
-        case .roleCard:
-            store.importRoleCardFile(url: url)
-        case .promptMode:
-            store.importPromptModeJSON(url: url)
-        }
     }
 
     private func processingKeyBinding(_ index: Int) -> Binding<String> {

@@ -127,10 +127,31 @@ final class TimeTavernStore: ObservableObject {
         return max(0, currentCharacterCount - lastFlushedCharacterCount) >= streamingUIFlushCharacterThreshold
     }
 
+    nonisolated static func imageRequestsToRunInBackground(
+        _ requests: [CompressionImageRequest],
+        phase: CompressionProcessingPhase
+    ) -> [CompressionImageRequest] {
+        switch phase {
+        case .beforeReasoner:
+            requests.filter(\.runsInParallel)
+        case .afterAssistant:
+            []
+        }
+    }
+
+    nonisolated static func imageRequestsToAwait(
+        _ requests: [CompressionImageRequest],
+        phase: CompressionProcessingPhase
+    ) -> [CompressionImageRequest] {
+        let background = Set(imageRequestsToRunInBackground(requests, phase: phase))
+        return requests.filter { !background.contains($0) }
+    }
+
     func attach(modelContext: ModelContext) {
         guard database == nil else { return }
         database = AppDatabase(context: modelContext)
         state = database?.loadState() ?? AppState()
+        repairCompressionRuntimeIfNeeded()
         deepSeekKey = (try? secretStore.read(.deepSeekAPIKey)) ?? ""
         deepSeekProcessingKeys = DeepSeekKeySet.decodeProcessingKeys((try? secretStore.read(.deepSeekProcessingAPIKeys)) ?? "")
         novelAIKey = (try? secretStore.read(.novelAIAPIKey)) ?? ""
@@ -170,6 +191,13 @@ final class TimeTavernStore: ObservableObject {
         }
     }
 
+    private func repairCompressionRuntimeIfNeeded() {
+        let repairedModes = conversationEngine.repairCompressionRuntimeIfBeyondCurrentConversation(state: state)
+        guard repairedModes != state.promptModes else { return }
+        state.promptModes = repairedModes
+        persist()
+    }
+
     func createRoleCard() {
         var card = RoleCard()
         card.name = "新角色"
@@ -181,6 +209,10 @@ final class TimeTavernStore: ObservableObject {
     func start(roleCard: RoleCard) {
         state.activeRoleCardId = roleCard.id
         state.activeAssistantMode = ""
+        state.promptModes = conversationEngine.resetCompressionRuntimeForNewConversation(
+            state: state,
+            roleCard: roleCard
+        )
         state.conversation = []
         if let opening = roleCard.activeOpeningDialogue?.content, !opening.isEmpty {
             let renderedOpening = ConversationEngine.renderTemplate(
@@ -199,6 +231,57 @@ final class TimeTavernStore: ObservableObject {
         state.activeAssistantMode = assistantCard.id
         state.conversation = []
         statusText = "\(assistantCard.displayName) 已啟用。"
+        persist()
+    }
+
+    @discardableResult
+    func createAssistantCard() -> AssistantCard {
+        let prompt = state.characterCardCreationAssistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? AssistantCard.defaultPrompt
+            : state.characterCardCreationAssistantPrompt
+        let card = AssistantCard.custom(name: "新助手", prompt: prompt)
+        state.assistantCards = AssistantCard.normalizedCards(state.assistantCards + [card])
+        statusText = "助手已建立。"
+        persist()
+        return state.assistantCards.first { $0.id == card.id } ?? card
+    }
+
+    func update(assistantCard: AssistantCard) {
+        var next = assistantCard
+        next.updatedAt = ISO8601DateFormatter().string(from: Date())
+        state.assistantCards = AssistantCard.normalizedCards(state.assistantCards)
+        guard let index = state.assistantCards.firstIndex(where: { $0.id == next.id }) else {
+            state.assistantCards = AssistantCard.normalizedCards(state.assistantCards + [next])
+            persist()
+            return
+        }
+        if state.assistantCards[index].isDefault {
+            next.id = AssistantCard.characterCardCreationAssistantID
+            next.name = AssistantCard.defaultAssistantName
+            next.locked = true
+            state.characterCardCreationAssistantPrompt = next.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? AssistantCard.defaultPrompt
+                : next.prompt
+        }
+        state.assistantCards[index] = next
+        state.assistantCards = AssistantCard.normalizedCards(state.assistantCards, defaultPrompt: state.characterCardCreationAssistantPrompt)
+        statusText = "助手卡已保存。"
+        persist()
+    }
+
+    func deleteAssistantCard(_ assistantCard: AssistantCard) {
+        state.assistantCards = AssistantCard.normalizedCards(state.assistantCards)
+        guard let index = state.assistantCards.firstIndex(where: { $0.id == assistantCard.id }),
+              !state.assistantCards[index].locked else {
+            statusText = "內建助手不能刪除。"
+            return
+        }
+        state.assistantCards.remove(at: index)
+        if state.activeAssistantMode == assistantCard.id {
+            state.activeAssistantMode = ""
+            state.conversation = []
+        }
+        statusText = "助手已刪除。"
         persist()
     }
 
@@ -309,6 +392,7 @@ final class TimeTavernStore: ObservableObject {
             statusText = uiStatic("生成中，請先停止目前回覆。")
             return
         }
+        repairCompressionRuntimeIfNeeded()
         let userTurn = state.conversation.filter { $0.role == .user }.count + 1
         let userMessage = ConversationMessage(
             role: .user,
@@ -483,6 +567,8 @@ final class TimeTavernStore: ObservableObject {
             phase: phase
         )
         guard !requests.isEmpty || !imageRequests.isEmpty else { return CompressionPhaseResult() }
+        let backgroundImageRequests = Self.imageRequestsToRunInBackground(imageRequests, phase: phase)
+        let awaitedImageRequests = Self.imageRequestsToAwait(imageRequests, phase: phase)
 
         var completed = 0
         var completedProfileIDs: [String] = []
@@ -526,65 +612,13 @@ final class TimeTavernStore: ObservableObject {
                 ), at: 0)
             }
         }
-        for request in imageRequests {
-            do {
-                let key = currentDeepSeekKeySet().contextCompressionKey(profileIndex: request.profileIndex)
-                let promptResult = try await deepSeekClient.complete(
-                    apiKey: key,
-                    settings: state.apiSettings,
-                    messages: request.messages
-                )
-                let basePrompt = promptResult.content.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !basePrompt.isEmpty else {
-                    throw TimeTavernError.network("跑圖大模型沒有輸出 NovelAI Base Prompt。")
-                }
-                state.promptModes = conversationEngine.applyImageCompressionStarted(state: state, request: request)
-                var studioSettings = NovelAIStudioSettings()
-                studioSettings.basePrompt = basePrompt
-                studioSettings.negativePrompt = request.imageSettings.negativePrompt
-                studioSettings.imageSettings = request.imageSettings
-                let images = try await novelAIClient.generateImages(
-                    apiKey: novelAIKey,
-                    settings: state.apiSettings,
-                    studioSettings: studioSettings
-                )
-                state.novelAIAlbum.insert(contentsOf: images, at: 0)
-                let imageCount = images.count
-                state.conversation.append(ConversationMessage(
-                    role: .assistant,
-                    content: "【\(request.triggerActionName)】圖片生成完成" + (imageCount > 0 ? "（\(imageCount) 張，已保存到 NovelAI 相簿）" : ""),
-                    source: "model_image",
-                    turnNumber: request.turnNumber,
-                    imageData: images.first?.imageData
-                ))
-                state.aiLogs.insert(AILogEntry(
-                    purpose: compressionPurpose(profileID: request.profileID, suffix: "image_prompt"),
-                    model: "\(promptResult.model) + \(NovelAIModelOption.title(for: request.imageSettings.model))",
-                    temperature: state.apiSettings.temperature,
-                    maxTokens: state.apiSettings.maxTokens,
-                    requestMessages: request.messages,
-                    responseText: basePrompt,
-                    debugReasoningContent: promptResult.reasoningContent,
-                    usage: promptResult.usage
-                ), at: 0)
+        for request in backgroundImageRequests {
+            state.promptModes = conversationEngine.applyImageCompressionStarted(state: state, request: request)
+            startParallelImageCompression(request)
+        }
+        for request in awaitedImageRequests {
+            if await processImageCompressionRequest(request, markStartedAfterPrompt: true, persistWhenFinished: false) {
                 completed += 1
-            } catch {
-                state.conversation.append(ConversationMessage(
-                    role: .assistant,
-                    content: "【\(request.triggerActionName)】圖片生成失敗：\(error.localizedDescription)",
-                    source: "model_image",
-                    turnNumber: request.turnNumber
-                ))
-                state.aiLogs.insert(AILogEntry(
-                    purpose: compressionPurpose(profileID: request.profileID, suffix: "image_prompt"),
-                    model: state.apiSettings.deepSeekModel,
-                    temperature: state.apiSettings.temperature,
-                    maxTokens: state.apiSettings.maxTokens,
-                    requestMessages: request.messages,
-                    responseText: "",
-                    error: error.localizedDescription,
-                    status: "error"
-                ), at: 0)
             }
         }
         if Self.shouldMarkCompressionNotice(completedProfileIDs: completedProfileIDs),
@@ -597,6 +631,93 @@ final class TimeTavernStore: ObservableObject {
             skipRequests: skipRequests,
             warning: warning
         )
+    }
+
+    private func startParallelImageCompression(_ request: CompressionImageRequest) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.processImageCompressionRequest(
+                request,
+                markStartedAfterPrompt: false,
+                persistWhenFinished: true
+            )
+        }
+    }
+
+    @discardableResult
+    private func processImageCompressionRequest(
+        _ request: CompressionImageRequest,
+        markStartedAfterPrompt: Bool,
+        persistWhenFinished: Bool
+    ) async -> Bool {
+        do {
+            let key = currentDeepSeekKeySet().contextCompressionKey(profileIndex: request.profileIndex)
+            let promptResult = try await deepSeekClient.complete(
+                apiKey: key,
+                settings: state.apiSettings,
+                messages: request.messages
+            )
+            let basePrompt = promptResult.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !basePrompt.isEmpty else {
+                throw TimeTavernError.network("跑圖大模型沒有輸出 NovelAI Base Prompt。")
+            }
+            if markStartedAfterPrompt {
+                state.promptModes = conversationEngine.applyImageCompressionStarted(state: state, request: request)
+            }
+            var studioSettings = NovelAIStudioSettings()
+            studioSettings.basePrompt = basePrompt
+            studioSettings.negativePrompt = request.imageSettings.negativePrompt
+            studioSettings.imageSettings = request.imageSettings
+            let images = try await novelAIClient.generateImages(
+                apiKey: novelAIKey,
+                settings: state.apiSettings,
+                studioSettings: studioSettings
+            )
+            state.novelAIAlbum.insert(contentsOf: images, at: 0)
+            let imageCount = images.count
+            state.conversation.append(ConversationMessage(
+                role: .assistant,
+                content: "【\(request.triggerActionName)】圖片生成完成" + (imageCount > 0 ? "（\(imageCount) 張，已保存到 NovelAI 相簿）" : ""),
+                source: "model_image",
+                turnNumber: request.turnNumber,
+                imageData: images.first?.imageData
+            ))
+            state.aiLogs.insert(AILogEntry(
+                purpose: compressionPurpose(profileID: request.profileID, suffix: "image_prompt"),
+                model: "\(promptResult.model) + \(NovelAIModelOption.title(for: request.imageSettings.model))",
+                temperature: state.apiSettings.temperature,
+                maxTokens: state.apiSettings.maxTokens,
+                requestMessages: request.messages,
+                responseText: basePrompt,
+                debugReasoningContent: promptResult.reasoningContent,
+                usage: promptResult.usage
+            ), at: 0)
+            if persistWhenFinished {
+                persist()
+            }
+            return true
+        } catch {
+            state.conversation.append(ConversationMessage(
+                role: .assistant,
+                content: "【\(request.triggerActionName)】圖片生成失敗：\(error.localizedDescription)",
+                source: "model_image",
+                turnNumber: request.turnNumber
+            ))
+            state.aiLogs.insert(AILogEntry(
+                purpose: compressionPurpose(profileID: request.profileID, suffix: "image_prompt"),
+                model: state.apiSettings.deepSeekModel,
+                temperature: state.apiSettings.temperature,
+                maxTokens: state.apiSettings.maxTokens,
+                requestMessages: request.messages,
+                responseText: "",
+                error: error.localizedDescription,
+                status: "error"
+            ), at: 0)
+            if persistWhenFinished {
+                persist()
+            }
+            return false
+        }
     }
 
     private func completeValidatedCompressionRequest(
@@ -920,6 +1041,7 @@ final class TimeTavernStore: ObservableObject {
 
             var next = state
             next.roleCards = restored.roleCards
+            next.assistantCards = restored.assistantCards
             next.promptModes = restored.promptModes
             next.userProfile = restored.userProfile
             next.timeTracking = restored.timeTracking
@@ -928,6 +1050,7 @@ final class TimeTavernStore: ObservableObject {
             next.activeRoleCardId = restored.activeRoleCardId
             next.activeAssistantMode = restored.activeAssistantMode
             next.characterCardCreationAssistantPrompt = restored.characterCardCreationAssistantPrompt
+            next.assistantCards = AssistantCard.normalizedCards(next.assistantCards, defaultPrompt: next.characterCardCreationAssistantPrompt)
             next.conversation = []
             next.savedSessions = [backup] + preservedSessions
             next.novelAIAlbum = preservedAlbum
@@ -935,7 +1058,7 @@ final class TimeTavernStore: ObservableObject {
             next.localDefaults = localDefaults
             state = next
             let source = localDefaults == nil ? "網頁 bundle 預設" : "本機預設"
-            statusText = "已還原\(source)：\(restored.roleCards.count) 張角色卡、\(restored.promptModes.count) 個 Prompt 模式。"
+            statusText = "已還原\(source)：\(restored.roleCards.count) 張角色卡、\(restored.assistantCards.count) 張助手卡、\(restored.promptModes.count) 個 Prompt 模式。"
             persist()
         } catch {
             statusText = "還原預設失敗：\(error.localizedDescription)"
@@ -951,6 +1074,7 @@ final class TimeTavernStore: ObservableObject {
         state.characterCardCreationAssistantPrompt = bundledPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? AssistantCard.defaultPrompt
             : bundledPrompt
+        state.assistantCards = AssistantCard.normalizedCards(state.assistantCards, defaultPrompt: state.characterCardCreationAssistantPrompt)
         persist()
     }
 
@@ -960,8 +1084,10 @@ final class TimeTavernStore: ObservableObject {
         state.apiSettings = snapshot.apiSettings
         state.roleCards = snapshot.roleCards
         state.activeRoleCardId = snapshot.activeRoleCardId
+        state.assistantCards = snapshot.assistantCards
         state.activeAssistantMode = snapshot.activeAssistantMode
         state.characterCardCreationAssistantPrompt = snapshot.characterCardCreationAssistantPrompt
+        state.assistantCards = AssistantCard.normalizedCards(state.assistantCards, defaultPrompt: state.characterCardCreationAssistantPrompt)
         state.promptModes = snapshot.promptModes
         state.timeTracking = snapshot.timeTracking
         state.novelAIStudioSettings = snapshot.novelAIStudioSettings

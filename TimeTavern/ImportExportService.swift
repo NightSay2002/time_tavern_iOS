@@ -579,6 +579,7 @@ private struct SillyTavernBookEntry: Decodable {
 
 struct BundledWebDefaultsSummary: Hashable {
     var roleCardCount: Int = 0
+    var assistantCardCount: Int = 0
     var promptModeCount: Int = 0
     var userDisplayName: String = ""
     var activeRoleCardName: String = ""
@@ -599,6 +600,7 @@ final class BundledWebDefaultsService {
         let state = try loadDefaults()
         return BundledWebDefaultsSummary(
             roleCardCount: state.roleCards.count,
+            assistantCardCount: state.assistantCards.count,
             promptModeCount: state.promptModes.count,
             userDisplayName: state.userProfile.userName,
             activeRoleCardName: state.activeRoleCard?.name ?? state.roleCards.first?.name ?? ""
@@ -634,6 +636,7 @@ final class BundledWebDefaultsService {
         if let prompt = try? String(contentsOf: assistantPromptURL, encoding: .utf8),
            !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             state.characterCardCreationAssistantPrompt = prompt
+            state.assistantCards = AssistantCard.normalizedCards(state.assistantCards, defaultPrompt: prompt)
         }
         return state
     }
@@ -655,6 +658,7 @@ private struct WebDefaults: Decodable {
     var characterCardCreationAssistantPrompt: String?
     var userProfile: WebUserProfile?
     var roleCards: [WebRoleCard] = []
+    var assistantCards: [AssistantCard] = []
     var conversationSettings: WebConversationSettings?
     var timeTracking: WebTimeTracking?
 
@@ -662,16 +666,21 @@ private struct WebDefaults: Decodable {
         var state = AppState()
         if let userProfile { state.userProfile = userProfile.native }
         state.roleCards = roleCards.map(\.native)
+        state.assistantCards = AssistantCard.normalizedCards(assistantCards)
         if let activeRoleCardId, state.roleCards.contains(where: { $0.id == activeRoleCardId }) {
             state.activeRoleCardId = activeRoleCardId
         } else {
             state.activeRoleCardId = state.roleCards.first?.id ?? ""
         }
-        state.activeAssistantMode = AssistantCard.normalizedMode(activeAssistantMode)
         if let characterCardCreationAssistantPrompt,
            !characterCardCreationAssistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             state.characterCardCreationAssistantPrompt = characterCardCreationAssistantPrompt
+            state.assistantCards = AssistantCard.normalizedCards(state.assistantCards, defaultPrompt: characterCardCreationAssistantPrompt)
+        } else if let defaultAssistantPrompt = state.assistantCards.first(where: \.isDefault)?.prompt,
+                  !defaultAssistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            state.characterCardCreationAssistantPrompt = defaultAssistantPrompt
         }
+        state.activeAssistantMode = AssistantCard.normalizedMode(activeAssistantMode, cards: state.assistantCards)
         if let timeTracking { state.timeTracking = timeTracking.native }
         if let conversationSettings {
             state.apiSettings.deepSeekModel = conversationSettings.chatOutputModel ?? state.apiSettings.deepSeekModel

@@ -71,14 +71,13 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertTrue(KeyboardDismissTapDelegate.isEditableTextInputView(child))
     }
 
-    func testSettingsImportButtonsUseSinglePresenterAndFullRowTapArea() {
-        XCTAssertTrue(SettingsView.usesSingleDocumentImporterForJSONImports)
-        XCTAssertTrue(SettingsView.importButtonsUseFullRowHitArea)
-        XCTAssertTrue(SettingsView.shouldShowImporter(afterStarting: .roleCard))
-        XCTAssertTrue(SettingsView.shouldShowImporter(afterStarting: .promptMode))
+    func testJSONImportEntrancesLiveWithTheirFeatureScreens() {
+        XCTAssertFalse(SettingsView.exposesJSONImportActions)
+        XCTAssertTrue(CharactersView.exposesRoleCardImportAction)
+        XCTAssertTrue(PromptLabView.exposesPromptModeImportAction)
 
-        XCTAssertEqual(Set(SettingsImportTarget.roleCard.allowedContentTypes), Set([.json, .png, .jpeg]))
-        XCTAssertEqual(SettingsImportTarget.promptMode.allowedContentTypes, [.json])
+        XCTAssertEqual(Set(AppImportTarget.roleCard.allowedContentTypes), Set([.json, .png, .jpeg]))
+        XCTAssertEqual(AppImportTarget.promptMode.allowedContentTypes, [.json])
     }
 
     func testHeaderTopActionsDisableDuringGeneration() {
@@ -88,6 +87,10 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(ChatSceneHeader.sessionTitle(activeRoleCard: RoleCard(name: "千夜"), activeAssistantCard: nil), "千夜")
         XCTAssertEqual(ChatSceneHeader.modelSubtitle(model: "deepseek-reasoner"), "DeepSeek deepseek-reasoner")
         XCTAssertTrue(ChatView.requiresRegenerateConfirmation)
+        XCTAssertTrue(ChatView.opensAtCurrentConversationPosition)
+        XCTAssertEqual(ChatView.initialScrollDestination(conversationIsEmpty: false, hasPerformedInitialScroll: false), .current)
+        XCTAssertNil(ChatView.initialScrollDestination(conversationIsEmpty: true, hasPerformedInitialScroll: false))
+        XCTAssertNil(ChatView.initialScrollDestination(conversationIsEmpty: false, hasPerformedInitialScroll: true))
         XCTAssertTrue(ModelContentView.hasCloseToolbarAction)
         XCTAssertTrue(LogView.hasCloseToolbarAction)
     }
@@ -257,7 +260,10 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertFalse(VisualNovelComposer.shouldDismissInputAfterPrimaryAction(isGenerating: false, text: "   \n"))
         XCTAssertFalse(VisualNovelComposer.shouldDismissInputAfterPrimaryAction(isGenerating: true, text: "停止生成"))
         XCTAssertTrue(VisualNovelComposer.showsPlusInsertMenu)
+        XCTAssertTrue(VisualNovelComposer.showsScrollTeleportActions)
         XCTAssertEqual(VisualNovelComposer.quickInsertItems.map(\.text), ["｛繼續｝", "（）", "｛推进剧情到下一个场景｝", "｛时间流逝——｝"])
+        XCTAssertEqual(VisualNovelComposer.quickScrollItems.map(\.title), ["回到最開始", "回到現狀"])
+        XCTAssertEqual(VisualNovelComposer.quickScrollItems.map(\.destination), [.start, .current])
         XCTAssertTrue(VisualNovelComposer.slashCommandItems.map(\.text).contains("/reload "))
         XCTAssertEqual(VisualNovelComposer.composerTextByInserting(current: "", insertion: "｛繼續｝"), "｛繼續｝")
         XCTAssertEqual(VisualNovelComposer.composerTextByInserting(current: "前文", insertion: "（）"), "前文\n（）")
@@ -568,9 +574,34 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertTrue(CharactersView.separatesRoleCardsAndAssistantCards)
         XCTAssertTrue(CharactersView.exposesRoleCardDeleteAction)
         XCTAssertTrue(CharactersView.confirmsRoleCardDeletion)
+        XCTAssertTrue(CharactersView.supportsCustomAssistantCards)
+        XCTAssertTrue(AssistantPromptEditorView.exposesAssistantNameDescriptionPromptFields)
+        XCTAssertTrue(RoleCardEditorView.exposesCustomSectionImagePromptToggle)
         XCTAssertTrue(messages.first?.content.contains("助手 prompt for 旅人 and 建立卡助手") == true)
         XCTAssertEqual(messages.last?.role, "user")
         XCTAssertEqual(messages.last?.content, "幫我建立角色卡")
+    }
+
+    func testCustomAssistantCardPromptMessagesUseSelectedCardPrompt() throws {
+        var state = AppState()
+        let assistant = AssistantCard(
+            id: "assistant_custom",
+            name: "超簡潔助手",
+            description: "超簡潔",
+            prompt: "自訂助手 prompt for {{user}} and {{chur}}",
+            locked: false
+        )
+        state.assistantCards = AssistantCard.normalizedCards([assistant])
+        state.activeAssistantMode = "assistant_custom"
+        state.characterCardCreationAssistantPrompt = "不應使用這個 prompt"
+        state.userProfile.userName = "時分"
+
+        let messages = try ConversationEngine().buildPromptMessages(state: state, userInput: "幫我解決")
+
+        XCTAssertEqual(state.activeAssistantCard?.displayName, "超簡潔助手")
+        XCTAssertTrue(messages.first?.content.contains("自訂助手 prompt for 時分 and 超簡潔助手") == true)
+        XCTAssertFalse(messages.first?.content.contains("不應使用這個 prompt") == true)
+        XCTAssertEqual(messages.last?.content, "幫我解決")
     }
 
     @MainActor
@@ -584,6 +615,35 @@ final class TimeTavernTests: XCTestCase {
 
         XCTAssertEqual(store.state.activeRoleCardId, "")
         XCTAssertEqual(store.state.activeAssistantMode, AssistantCard.characterCardCreationAssistantID)
+        XCTAssertEqual(store.state.conversation, [])
+    }
+
+    @MainActor
+    func testCreateEditDeleteCustomAssistantCardFlow() {
+        let store = TimeTavernStore()
+        store.state.characterCardCreationAssistantPrompt = "建立卡助手 prompt"
+
+        var assistant = store.createAssistantCard()
+        assistant.name = "新助手 A"
+        assistant.description = "自訂助手卡。"
+        assistant.prompt = "自訂 prompt"
+        store.update(assistantCard: assistant)
+        let saved = store.state.assistantCards.first { $0.id == assistant.id }
+
+        XCTAssertEqual(saved?.displayName, "新助手 A")
+        XCTAssertEqual(saved?.prompt, "自訂 prompt")
+        XCTAssertFalse(saved?.locked ?? true)
+
+        store.state.conversation = [ConversationMessage(role: .assistant, content: "old")]
+        store.start(assistantCard: saved ?? assistant)
+        XCTAssertEqual(store.state.activeAssistantMode, assistant.id)
+        XCTAssertEqual(store.state.conversation, [])
+
+        store.state.conversation = [ConversationMessage(role: .assistant, content: "active")]
+        store.deleteAssistantCard(saved ?? assistant)
+
+        XCTAssertFalse(store.state.assistantCards.contains { $0.id == assistant.id })
+        XCTAssertEqual(store.state.activeAssistantMode, "")
         XCTAssertEqual(store.state.conversation, [])
     }
 
@@ -669,6 +729,97 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(store.state.conversation.count, 1)
         XCTAssertEqual(store.state.conversation.first?.content, "第二段開場")
         XCTAssertFalse(store.state.conversation.first?.content.contains("第一段開場") ?? true)
+    }
+
+    @MainActor
+    func testStartRoleCardResetsCompressionRuntimeLikeWebStart() {
+        let store = TimeTavernStore()
+        var card = RoleCard(id: "role_1", name: "勇者隱居")
+        card.mode = .multi
+        card.promptModeId = "multi"
+        store.state.roleCards = [card]
+        store.state.activeRoleCardId = card.id
+        store.state.promptModes = [
+            PromptModeConfig(
+                id: "multi",
+                name: "多角色",
+                mode: "multi",
+                dialogueContextRounds: 20,
+                compressionProfiles: [
+                    CompressionProfile(
+                        id: "standard",
+                        name: "標準壓縮模型",
+                        triggerActions: [
+                            CompressionTriggerAction(triggers: CompressionTriggerConfig(roundLimit: true))
+                        ],
+                        summary: "舊故事摘要",
+                        compressedThroughTurnNumber: 40
+                    ),
+                    CompressionProfile(
+                        id: "image",
+                        name: "跑圖",
+                        triggerActions: [
+                            CompressionTriggerAction(
+                                name: "5 10 15 20",
+                                keywordFollowupAction: .imageParallelReasoner,
+                                triggers: CompressionTriggerConfig(roundLimit: false, turns: [5, 10, 15, 20])
+                            )
+                        ],
+                        summary: "舊圖片狀態",
+                        compressedThroughTurnNumber: 40
+                    )
+                ]
+            )
+        ]
+
+        store.start(roleCard: card)
+
+        let profiles = store.state.promptModes.first?.compressionProfiles ?? []
+        XCTAssertEqual(profiles.map(\.summary), ["", ""])
+        XCTAssertEqual(profiles.map(\.compressedThroughTurnNumber), [0, 0])
+    }
+
+    func testRepairCompressionRuntimeRestoresMissedScheduledTurnsFromDeviceState() {
+        var state = AppState()
+        var card = RoleCard(id: "role_1", name: "勇者隱居")
+        card.mode = .multi
+        card.promptModeId = "multi"
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+        state.conversation = Self.dialogueRounds(1...6)
+        state.promptModes = [
+            PromptModeConfig(
+                id: "multi",
+                name: "多角色",
+                mode: "multi",
+                dialogueContextRounds: 20,
+                compressionProfiles: [
+                    CompressionProfile(
+                        id: "image",
+                        name: "跑圖",
+                        triggerActions: [
+                            CompressionTriggerAction(
+                                name: "5 10 15 20",
+                                keywordFollowupAction: .imageParallelReasoner,
+                                triggers: CompressionTriggerConfig(roundLimit: false, turns: [5, 10, 15, 20])
+                            )
+                        ],
+                        summary: "",
+                        compressedThroughTurnNumber: 40
+                    )
+                ]
+            )
+        ]
+        let engine = ConversationEngine()
+        XCTAssertEqual(engine.compressionImageRequests(state: state, latestUserInput: "第 7 輪使用者").count, 0)
+
+        state.promptModes = engine.repairCompressionRuntimeIfBeyondCurrentConversation(state: state)
+        state.conversation.append(ConversationMessage(role: .user, content: "第 7 輪使用者", turnNumber: 7))
+        state.conversation.append(ConversationMessage(role: .assistant, content: "", turnNumber: 7))
+
+        let requests = engine.compressionImageRequests(state: state, latestUserInput: "第 7 輪使用者")
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.compressedThroughTurnNumber, 7)
     }
 
     func testRoleCardEditorLorebookListEditsOneSelectedEntryLikeWebEditor() {
@@ -1470,10 +1621,106 @@ final class TimeTavernTests: XCTestCase {
             return state
         }
 
-        XCTAssertEqual(engine.compressionAPIRequests(state: state(turn: 5, compressedThroughTurnNumber: 0), latestUserInput: "第 5 輪").count, 1)
+        let fifthTurnRequests = engine.compressionAPIRequests(state: state(turn: 5, compressedThroughTurnNumber: 0), latestUserInput: "第 5 輪")
+        XCTAssertEqual(fifthTurnRequests.count, 1)
+        XCTAssertEqual(fifthTurnRequests.first?.compressedThroughTurnNumber, 5)
         XCTAssertEqual(engine.compressionAPIRequests(state: state(turn: 6, compressedThroughTurnNumber: 5), latestUserInput: "第 6 輪").count, 0)
         XCTAssertEqual(engine.compressionAPIRequests(state: state(turn: 10, compressedThroughTurnNumber: 5), latestUserInput: "第 10 輪").count, 1)
         XCTAssertEqual(engine.compressionAPIRequests(state: state(turn: 25, compressedThroughTurnNumber: 20), latestUserInput: "第 25 輪").count, 1)
+    }
+
+    func testCompressionRequestsUseResolvedActivePromptModeAfterModeKindEdits() {
+        var state = AppState()
+        var card = RoleCard()
+        card.mode = .multi
+        card.promptModeId = ""
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+        state.conversation = Self.dialogueRounds(1...20) + [
+            ConversationMessage(role: .user, content: "第 21 輪使用者", turnNumber: 21),
+            ConversationMessage(role: .assistant, content: "", turnNumber: 21)
+        ]
+        state.promptModes = [
+            PromptModeConfig(
+                id: "multi",
+                name: "多角色",
+                mode: "edited-multi-mode-field",
+                dialogueContextRounds: 20,
+                compressionProfiles: [
+                    CompressionProfile(
+                        id: "standard",
+                        name: "標準壓縮模型",
+                        triggerActions: [
+                            CompressionTriggerAction(
+                                name: "標準壓縮",
+                                triggers: CompressionTriggerConfig(roundLimit: true)
+                            )
+                        ]
+                    ),
+                    CompressionProfile(
+                        id: "memory",
+                        name: "普通大模型",
+                        triggerActions: [
+                            CompressionTriggerAction(
+                                name: "普通大模型上限",
+                                triggers: CompressionTriggerConfig(roundLimit: true)
+                            )
+                        ]
+                    )
+                ]
+            )
+        ]
+
+        let requests = ConversationEngine().compressionAPIRequests(state: state, latestUserInput: "第 21 輪使用者")
+        let requestText = requests.first?.messages.map(\.content).joined(separator: "\n") ?? ""
+
+        XCTAssertEqual(requests.map(\.profileID), ["standard", "memory"])
+        XCTAssertEqual(requests.first?.compressedThroughTurnNumber, 20)
+        XCTAssertTrue(requestText.contains("第 20 輪回覆"))
+        XCTAssertFalse(requestText.contains("第 21 輪使用者"))
+    }
+
+    func testRoundLimitCompressionWaitsForCompletedUncompressedRoundsLikeWeb() {
+        var state = AppState()
+        var card = RoleCard()
+        card.promptModeId = "multi"
+        state.roleCards = [card]
+        state.activeRoleCardId = card.id
+        state.conversation = Self.dialogueRounds(1...9) + [
+            ConversationMessage(role: .user, content: "第 10 輪使用者", turnNumber: 10),
+            ConversationMessage(role: .assistant, content: "", turnNumber: 10)
+        ]
+        state.promptModes = [
+            PromptModeConfig(
+                id: "multi",
+                name: "多角色",
+                mode: "multi",
+                dialogueContextRounds: 5,
+                compressionProfiles: [
+                    CompressionProfile(
+                        id: "standard",
+                        name: "標準壓縮模型",
+                        triggerActions: [
+                            CompressionTriggerAction(
+                                name: "標準壓縮",
+                                triggers: CompressionTriggerConfig(roundLimit: true)
+                            )
+                        ],
+                        compressedThroughTurnNumber: 5
+                    )
+                ]
+            )
+        ]
+        let engine = ConversationEngine()
+
+        XCTAssertEqual(engine.compressionAPIRequests(state: state, latestUserInput: "第 10 輪使用者").count, 0)
+
+        state.conversation = Self.dialogueRounds(1...10) + [
+            ConversationMessage(role: .user, content: "第 11 輪使用者", turnNumber: 11),
+            ConversationMessage(role: .assistant, content: "", turnNumber: 11)
+        ]
+
+        XCTAssertEqual(engine.compressionAPIRequests(state: state, latestUserInput: "第 11 輪使用者").count, 1)
     }
 
     func testNonStandardProfileProgressDoesNotResetReasonerContext() throws {
@@ -1668,9 +1915,16 @@ final class TimeTavernTests: XCTestCase {
     func testCompressionImageRequestsUseBasePromptAndDoNotSaveNormalSummary() throws {
         var state = AppState()
         var card = RoleCard()
+        card.name = "千夜"
         card.promptModeId = "multi"
+        card.customSections = [
+            CustomSection(name: "外觀", content: "{{user}} 眼中的 {{chur}} 是金髮金眼。", includeInImagePrompt: true),
+            CustomSection(name: "普通內容", content: "不應放入跑圖。", includeInImagePrompt: false),
+            CustomSection(name: "停用外觀", content: "不應出現。", enabled: false, includeInImagePrompt: true)
+        ]
         state.roleCards = [card]
         state.activeRoleCardId = card.id
+        state.userProfile.userName = "旅人"
         state.conversation = [
             ConversationMessage(role: .user, content: "角色看見月下酒館", turnNumber: 1),
             ConversationMessage(role: .assistant, content: "燈火映在木桌。", turnNumber: 1)
@@ -1719,7 +1973,13 @@ final class TimeTavernTests: XCTestCase {
 
         XCTAssertEqual(engine.compressionAPIRequests(state: state, latestUserInput: "跑圖"), [])
         XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.messages.first?.role, "system")
         XCTAssertTrue(requestText.contains("只輸出可直接送去 NovelAI 的 Base Prompt"))
+        XCTAssertTrue(requestText.contains("繪圖角色卡資料"))
+        XCTAssertTrue(requestText.contains("角色:千夜"))
+        XCTAssertTrue(requestText.contains("外觀:旅人 眼中的 千夜 是金髮金眼。"))
+        XCTAssertFalse(requestText.contains("普通內容"))
+        XCTAssertFalse(requestText.contains("停用外觀"))
         XCTAssertTrue(requestText.contains("【上下文】"))
         XCTAssertEqual(requests.first?.imageSettings.model, "nai-diffusion-4-5-curated")
         XCTAssertEqual(requests.first?.imageSettings.negativePrompt, "bad hands")
@@ -1727,6 +1987,43 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(locallyUpdated.compressedThroughTurnNumber, 0)
         XCTAssertEqual(started.summary, "")
         XCTAssertEqual(started.compressedThroughTurnNumber, 2)
+    }
+
+    func testParallelImageGenerationRequestsDoNotBlockBeforeReasoner() {
+        func request(id: String, parallel: Bool) -> CompressionImageRequest {
+            CompressionImageRequest(
+                modeID: "multi",
+                profileID: id,
+                profileName: id,
+                profileIndex: 0,
+                triggerActionID: id,
+                triggerActionName: id,
+                turnNumber: 5,
+                compressedThroughTurnNumber: 5,
+                messages: [ChatAPIMessage(role: "user", content: id)],
+                imageSettings: .compressionTriggerDefault,
+                runsInParallel: parallel
+            )
+        }
+        let blocking = request(id: "image_then", parallel: false)
+        let parallel = request(id: "image_parallel", parallel: true)
+
+        XCTAssertEqual(
+            TimeTavernStore.imageRequestsToRunInBackground([blocking, parallel], phase: .beforeReasoner).map(\.profileID),
+            ["image_parallel"]
+        )
+        XCTAssertEqual(
+            TimeTavernStore.imageRequestsToAwait([blocking, parallel], phase: .beforeReasoner).map(\.profileID),
+            ["image_then"]
+        )
+        XCTAssertEqual(
+            TimeTavernStore.imageRequestsToRunInBackground([blocking, parallel], phase: .afterAssistant).map(\.profileID),
+            []
+        )
+        XCTAssertEqual(
+            TimeTavernStore.imageRequestsToAwait([blocking, parallel], phase: .afterAssistant).map(\.profileID),
+            ["image_then", "image_parallel"]
+        )
     }
 
     func testCompressionBeforeReasonerCanSkipChatAfterUserKeyword() throws {
@@ -1899,6 +2196,9 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertTrue(state.roleCards.allSatisfy { $0.activeOpeningDialogue?.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false })
         XCTAssertTrue(state.roleCards.contains { !$0.coverImageDataURL.isEmpty })
         XCTAssertTrue(state.roleCards.allSatisfy { RoleCardCoverPosition(rawValue: $0.coverPosition) != nil })
+        XCTAssertEqual(state.assistantCards.count, 2)
+        XCTAssertEqual(state.assistantCards.first?.displayName, "建立卡助手")
+        XCTAssertTrue(state.assistantCards.contains { $0.displayName == "超簡潔助手" && !$0.locked })
         XCTAssertTrue(state.characterCardCreationAssistantPrompt.contains("你是中文設定助手"))
     }
 
@@ -2205,6 +2505,9 @@ final class TimeTavernTests: XCTestCase {
         card.coverImageData = coverData
         card.coverImageDataURL = coverURL
         card.coverPosition = RoleCardCoverPosition.topCenter.rawValue
+        card.customSections = [
+            CustomSection(name: "外觀", content: "金髮金眼", includeInImagePrompt: true)
+        ]
 
         let url = try service.exportRoleCardJSON(card)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -2215,6 +2518,7 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(imported.name, "測試角色 副本")
         XCTAssertEqual(imported.coverImageData, coverData)
         XCTAssertEqual(imported.coverPosition, RoleCardCoverPosition.topCenter.rawValue)
+        XCTAssertTrue(imported.customSections.first?.includeInImagePrompt == true)
     }
 
     func testJSONRoleCardImportSupportsWebAndSillyTavernFormats() throws {
@@ -2222,7 +2526,7 @@ final class TimeTavernTests: XCTestCase {
         let coverData = Data([4, 5, 6])
         let coverURL = "data:image/png;base64,\(coverData.base64EncodedString())"
         let webJSON = """
-        {"id":"web_1","name":"網頁角色","mode":"multi","coverImage":"\(coverURL)","coverPosition":"bottom right","customSections":[{"name":"設定","content":"內容","enabled":true}],"openingDialogue":"你好","lorebooks":[{"key":"井","keywords":["井"],"secondaryKeywords":["夜"],"content":"古井","permanent":true,"probability":50}]}
+        {"id":"web_1","name":"網頁角色","mode":"multi","coverImage":"\(coverURL)","coverPosition":"bottom right","customSections":[{"name":"設定","content":"內容","enabled":true,"drawPrompt":true}],"openingDialogue":"你好","lorebooks":[{"key":"井","keywords":["井"],"secondaryKeywords":["夜"],"content":"古井","permanent":true,"probability":50}]}
         """
         let webCard = try service.importRoleCardJSON(from: Data(webJSON.utf8), existingRoleCards: [])
 
@@ -2230,6 +2534,7 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(webCard.coverImageData, coverData)
         XCTAssertEqual(webCard.coverPosition, RoleCardCoverPosition.bottomRight.rawValue)
         XCTAssertEqual(webCard.customSections.first?.name, "設定")
+        XCTAssertTrue(webCard.customSections.first?.includeInImagePrompt == true)
         XCTAssertEqual(webCard.lorebooks.first?.title, "井")
         XCTAssertEqual(webCard.lorebooks.first?.secondaryKeywords, ["夜"])
         XCTAssertTrue(webCard.lorebooks.first?.permanent == true)
@@ -2402,7 +2707,7 @@ final class TimeTavernTests: XCTestCase {
 
         XCTAssertEqual(PromptLabView.modeIDs(at: IndexSet([1, 99]), in: modes), ["custom"])
         XCTAssertEqual(CompressionProfileListView.profileIDs(at: IndexSet([1, 99]), in: profiles), ["image"])
-        XCTAssertEqual(SettingsView.roleCardImportSymbolName, "person.crop.square")
+        XCTAssertEqual(CharactersView.roleCardImportSymbolName, "person.crop.square")
         XCTAssertFalse(PromptLabView.showsCompressionQuickSection)
         XCTAssertEqual(
             TriggerActionListView.validActionOffsets(IndexSet([0, 99]), in: [CompressionTriggerAction(id: "a")]),

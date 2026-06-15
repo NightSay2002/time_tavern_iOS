@@ -63,32 +63,194 @@ enum RoleCardCoverPosition: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-struct AssistantCard: Identifiable, Hashable {
+struct AssistantCard: Identifiable, Hashable, Codable {
     static let characterCardCreationAssistantID = "CharacterCardCreationAssistant"
+    static let defaultAssistantName = "建立卡助手"
+    static let defaultAssistantDescription = "專門協助建立角色卡、角色群組與無角色模式設定包。"
     static let characterCardCreationAssistant = AssistantCard(
         id: Self.characterCardCreationAssistantID,
-        displayName: "建立卡助手",
-        legacyDisplayName: "CharacterCardCreationAssistant",
-        summary: "角色卡、角色群組與無角色模式設定包建立助手。",
-        detail: "啟用後會重置目前對話，只使用助手 Prompt 直接回覆。"
+        name: Self.defaultAssistantName,
+        description: Self.defaultAssistantDescription,
+        prompt: Self.defaultPrompt,
+        locked: true
     )
     static let allCards: [AssistantCard] = [.characterCardCreationAssistant]
     static let defaultPrompt = "你是角色卡建立助手，請直接輸出正式正文。"
 
     var id: String
-    var displayName: String
-    var legacyDisplayName: String
-    var summary: String
-    var detail: String
+    var name: String
+    var description: String
+    var prompt: String
+    var locked: Bool
+    var createdAt: String
+    var updatedAt: String
+
+    init(
+        id: String = Self.newAssistantID(),
+        name: String = "",
+        description: String = "",
+        prompt: String = "",
+        locked: Bool = false,
+        createdAt: String = Self.nowISOString(),
+        updatedAt: String = Self.nowISOString()
+    ) {
+        self.id = id
+        self.name = name
+        self.description = description
+        self.prompt = prompt
+        self.locked = locked
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? ""
+        name = try container.decodeFirstString(forKeys: [.name, .title, .label])
+        description = try container.decodeFirstString(forKeys: [.description, .intro])
+        prompt = try container.decodeFirstString(forKeys: [.prompt, .systemPrompt, .systemPromptSnake])
+        locked = try container.decodeIfPresent(Bool.self, forKey: .locked) ?? false
+        createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt) ?? Self.nowISOString()
+        updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt) ?? Self.nowISOString()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(description, forKey: .description)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encode(locked, forKey: .locked)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+
+    var displayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        return isDefault ? Self.defaultAssistantName : "新助手"
+    }
+
+    var legacyDisplayName: String {
+        isDefault ? Self.characterCardCreationAssistantID : id
+    }
+
+    var summary: String {
+        let trimmed = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        return isDefault ? Self.defaultAssistantDescription : "自訂助手卡。"
+    }
+
+    var detail: String {
+        "啟用後會重置目前對話，只使用助手卡 Prompt 直接回覆。"
+    }
+
+    var isDefault: Bool {
+        id == Self.characterCardCreationAssistantID
+    }
+
+    static func normalizedCards(_ value: [AssistantCard], defaultPrompt: String? = nil) -> [AssistantCard] {
+        var cardsById: [String: AssistantCard] = [:]
+        var orderedIds: [String] = []
+        let fallbackPrompt = defaultPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        for (index, card) in value.enumerated() {
+            var next = card.normalized(index: index, defaultPrompt: fallbackPrompt)
+            if next.id.isEmpty {
+                continue
+            }
+            if cardsById[next.id] != nil {
+                next.id = newAssistantID()
+            }
+            cardsById[next.id] = next
+            orderedIds.append(next.id)
+        }
+
+        var defaultCard = characterCardCreationAssistant
+        if let importedDefault = cardsById.removeValue(forKey: characterCardCreationAssistantID) {
+            defaultCard.description = importedDefault.summary
+            let importedPrompt = importedDefault.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            defaultCard.prompt = !fallbackPrompt.isEmpty
+                ? fallbackPrompt
+                : (importedPrompt.isEmpty ? Self.defaultPrompt : importedDefault.prompt)
+            defaultCard.createdAt = importedDefault.createdAt
+            defaultCard.updatedAt = importedDefault.updatedAt
+        } else if !fallbackPrompt.isEmpty {
+            defaultCard.prompt = fallbackPrompt
+        }
+        defaultCard.name = defaultAssistantName
+        defaultCard.locked = true
+
+        let customCards = orderedIds
+            .filter { $0 != characterCardCreationAssistantID }
+            .compactMap { cardsById[$0] }
+        return [defaultCard] + customCards
+    }
+
+    static func normalizedMode(_ value: String?, cards: [AssistantCard]) -> String {
+        let normalized = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return cards.contains { $0.id == normalized } ? normalized : ""
+    }
 
     static func normalizedMode(_ value: String?) -> String {
-        let normalized = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return allCards.contains { $0.id == normalized } ? normalized : ""
+        normalizedMode(value, cards: allCards)
+    }
+
+    static func card(for mode: String?, cards: [AssistantCard]) -> AssistantCard? {
+        let normalized = normalizedMode(mode, cards: cards)
+        return cards.first { $0.id == normalized }
     }
 
     static func card(for mode: String?) -> AssistantCard? {
-        let normalized = normalizedMode(mode)
-        return allCards.first { $0.id == normalized }
+        card(for: mode, cards: allCards)
+    }
+
+    static func custom(name: String, prompt: String) -> AssistantCard {
+        AssistantCard(
+            id: newAssistantID(),
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "新助手" : name,
+            description: "自訂助手卡。",
+            prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultPrompt : prompt,
+            locked: false
+        )
+    }
+
+    private func normalized(index: Int, defaultPrompt: String) -> AssistantCard {
+        var next = self
+        let trimmedId = next.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        next.id = trimmedId.isEmpty
+            ? (index == 0 ? Self.characterCardCreationAssistantID : Self.newAssistantID())
+            : trimmedId
+        let isDefaultCard = next.id == Self.characterCardCreationAssistantID
+        let trimmedName = next.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDescription = next.description.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedPrompt = next.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        next.name = isDefaultCard
+            ? Self.defaultAssistantName
+            : (trimmedName.isEmpty ? "新助手 \(index + 1)" : trimmedName)
+        next.description = trimmedDescription.isEmpty
+            ? (isDefaultCard ? Self.defaultAssistantDescription : "自訂助手卡。")
+            : trimmedDescription
+        next.prompt = trimmedPrompt.isEmpty
+            ? (isDefaultCard ? (defaultPrompt.isEmpty ? Self.defaultPrompt : defaultPrompt) : Self.defaultPrompt)
+            : next.prompt
+        next.locked = isDefaultCard || next.locked
+        next.createdAt = next.createdAt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.nowISOString() : next.createdAt
+        next.updatedAt = next.updatedAt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Self.nowISOString() : next.updatedAt
+        return next
+    }
+
+    private static func newAssistantID() -> String {
+        "assistant_\(UUID().uuidString.lowercased())"
+    }
+
+    private static func nowISOString() -> String {
+        ISO8601DateFormatter().string(from: Date())
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, title, label, description, intro, prompt, systemPrompt, locked, createdAt, updatedAt
+        case systemPromptSnake = "system_prompt"
     }
 }
 
@@ -329,20 +491,58 @@ struct CustomSection: Codable, Identifiable, Hashable {
     var name: String = ""
     var content: String = ""
     var enabled: Bool = true
+    var includeInImagePrompt: Bool = false
 
-    init(id: String = UUID().uuidString, name: String = "", content: String = "", enabled: Bool = true) {
+    init(
+        id: String = UUID().uuidString,
+        name: String = "",
+        content: String = "",
+        enabled: Bool = true,
+        includeInImagePrompt: Bool = false
+    ) {
         self.id = id
         self.name = name
         self.content = content
         self.enabled = enabled
+        self.includeInImagePrompt = includeInImagePrompt
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
-        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
-        content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
+        name = try container.decodeStringFromPossibleKeys([.name, .title, .key, .label]) ?? ""
+        content = try container.decodeStringFromPossibleKeys([.content, .text, .value]) ?? ""
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        includeInImagePrompt = [
+            CodingKeys.includeInImagePrompt,
+            .imagePrompt,
+            .drawPrompt,
+            .includeInDrawing,
+            .useForImagePrompt
+        ].contains { key in
+            (try? container.decodeIfPresent(Bool.self, forKey: key)) == true
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(content, forKey: .content)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(includeInImagePrompt, forKey: .includeInImagePrompt)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name, title, key, label
+        case content, text, value
+        case enabled
+        case includeInImagePrompt
+        case imagePrompt
+        case drawPrompt
+        case includeInDrawing
+        case useForImagePrompt
     }
 }
 
@@ -2021,6 +2221,7 @@ struct AppDefaultsSnapshot: Codable, Hashable {
     var apiSettings = APISettings()
     var roleCards: [RoleCard] = []
     var activeRoleCardId: String = ""
+    var assistantCards: [AssistantCard] = [.characterCardCreationAssistant]
     var activeAssistantMode: String = ""
     var characterCardCreationAssistantPrompt: String = AssistantCard.defaultPrompt
     var promptModes: [PromptModeConfig] = AppState.defaultPromptModes()
@@ -2036,6 +2237,7 @@ struct AppDefaultsSnapshot: Codable, Hashable {
         apiSettings = state.apiSettings
         roleCards = state.roleCards
         activeRoleCardId = state.activeRoleCardId
+        assistantCards = state.assistantCards
         activeAssistantMode = state.activeAssistantMode
         characterCardCreationAssistantPrompt = state.characterCardCreationAssistantPrompt
         promptModes = state.promptModes
@@ -2051,8 +2253,19 @@ struct AppDefaultsSnapshot: Codable, Hashable {
         apiSettings = try container.decodeIfPresent(APISettings.self, forKey: .apiSettings) ?? APISettings()
         roleCards = try container.decodeIfPresent([RoleCard].self, forKey: .roleCards) ?? []
         activeRoleCardId = try container.decodeIfPresent(String.self, forKey: .activeRoleCardId) ?? ""
-        activeAssistantMode = AssistantCard.normalizedMode(try container.decodeIfPresent(String.self, forKey: .activeAssistantMode))
         characterCardCreationAssistantPrompt = try container.decodeIfPresent(String.self, forKey: .characterCardCreationAssistantPrompt) ?? AssistantCard.defaultPrompt
+        assistantCards = AssistantCard.normalizedCards(
+            try container.decodeIfPresent([AssistantCard].self, forKey: .assistantCards) ?? [],
+            defaultPrompt: characterCardCreationAssistantPrompt
+        )
+        if let defaultAssistantPrompt = assistantCards.first(where: \.isDefault)?.prompt,
+           !defaultAssistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            characterCardCreationAssistantPrompt = defaultAssistantPrompt
+        }
+        activeAssistantMode = AssistantCard.normalizedMode(
+            try container.decodeIfPresent(String.self, forKey: .activeAssistantMode),
+            cards: assistantCards
+        )
         promptModes = try container.decodeIfPresent([PromptModeConfig].self, forKey: .promptModes) ?? AppState.defaultPromptModes()
         timeTracking = try container.decodeIfPresent(TimeTrackingConfig.self, forKey: .timeTracking) ?? TimeTrackingConfig()
         novelAIStudioSettings = try container.decodeIfPresent(NovelAIStudioSettings.self, forKey: .novelAIStudioSettings) ?? NovelAIStudioSettings()
@@ -2066,6 +2279,7 @@ struct AppState: Codable, Hashable {
     var apiSettings = APISettings()
     var roleCards: [RoleCard] = []
     var activeRoleCardId: String = ""
+    var assistantCards: [AssistantCard] = [.characterCardCreationAssistant]
     var activeAssistantMode: String = ""
     var characterCardCreationAssistantPrompt: String = AssistantCard.defaultPrompt
     var promptModes: [PromptModeConfig] = AppState.defaultPromptModes()
@@ -2084,7 +2298,7 @@ struct AppState: Codable, Hashable {
     }
 
     var activeAssistantCard: AssistantCard? {
-        AssistantCard.card(for: activeAssistantMode)
+        AssistantCard.card(for: activeAssistantMode, cards: assistantCards)
     }
 
     func promptModeIndex(for roleCard: RoleCard) -> Int? {
@@ -2146,9 +2360,20 @@ struct AppState: Codable, Hashable {
         apiSettings = try container.decodeIfPresent(APISettings.self, forKey: .apiSettings) ?? APISettings()
         roleCards = try container.decodeIfPresent([RoleCard].self, forKey: .roleCards) ?? []
         activeRoleCardId = try container.decodeIfPresent(String.self, forKey: .activeRoleCardId) ?? ""
-        activeAssistantMode = AssistantCard.normalizedMode(try container.decodeIfPresent(String.self, forKey: .activeAssistantMode))
         characterCardCreationAssistantPrompt = try container.decodeIfPresent(String.self, forKey: .characterCardCreationAssistantPrompt) ??
             (try container.decodeIfPresent(String.self, forKey: .characterCardCreationAssistantPromptLegacy) ?? AssistantCard.defaultPrompt)
+        assistantCards = AssistantCard.normalizedCards(
+            try container.decodeIfPresent([AssistantCard].self, forKey: .assistantCards) ?? [],
+            defaultPrompt: characterCardCreationAssistantPrompt
+        )
+        if let defaultAssistantPrompt = assistantCards.first(where: \.isDefault)?.prompt,
+           !defaultAssistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            characterCardCreationAssistantPrompt = defaultAssistantPrompt
+        }
+        activeAssistantMode = AssistantCard.normalizedMode(
+            try container.decodeIfPresent(String.self, forKey: .activeAssistantMode),
+            cards: assistantCards
+        )
         promptModes = try container.decodeIfPresent([PromptModeConfig].self, forKey: .promptModes) ?? AppState.defaultPromptModes()
         conversation = try container.decodeIfPresent([ConversationMessage].self, forKey: .conversation) ?? []
         savedSessions = try container.decodeIfPresent([SavedSession].self, forKey: .savedSessions) ?? []
@@ -2170,6 +2395,7 @@ struct AppState: Codable, Hashable {
         try container.encode(apiSettings, forKey: .apiSettings)
         try container.encode(roleCards, forKey: .roleCards)
         try container.encode(activeRoleCardId, forKey: .activeRoleCardId)
+        try container.encode(assistantCards, forKey: .assistantCards)
         try container.encode(activeAssistantMode, forKey: .activeAssistantMode)
         try container.encode(characterCardCreationAssistantPrompt, forKey: .characterCardCreationAssistantPrompt)
         try container.encode(promptModes, forKey: .promptModes)
@@ -2185,7 +2411,7 @@ struct AppState: Codable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case userProfile, apiSettings, roleCards, activeRoleCardId, activeAssistantMode
+        case userProfile, apiSettings, roleCards, activeRoleCardId, assistantCards, activeAssistantMode
         case characterCardCreationAssistantPrompt
         case characterCardCreationAssistantPromptLegacy = "assistantPrompt"
         case promptModes, conversation, savedSessions, aiLogs, timeTracking
@@ -2196,6 +2422,18 @@ struct AppState: Codable, Hashable {
 private extension String {
     func prefixString(_ maxLength: Int) -> String {
         String(prefix(maxLength))
+    }
+}
+
+private extension KeyedDecodingContainer {
+    func decodeFirstString(forKeys keys: [Key]) throws -> String {
+        for key in keys {
+            if let value = try decodeIfPresent(String.self, forKey: key)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+        return ""
     }
 }
 

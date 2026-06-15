@@ -103,9 +103,16 @@ final class ConversationEngine {
     }
 
     private func buildAssistantPromptMessages(state: AppState, assistantCard: AssistantCard, userInput: String) -> [ChatAPIMessage] {
-        let prompt = state.characterCardCreationAssistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? AssistantCard.defaultPrompt
-            : state.characterCardCreationAssistantPrompt
+        let cardPrompt = assistantCard.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let legacyPrompt = state.characterCardCreationAssistantPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt: String
+        if assistantCard.isDefault, !legacyPrompt.isEmpty {
+            prompt = state.characterCardCreationAssistantPrompt
+        } else if !cardPrompt.isEmpty {
+            prompt = assistantCard.prompt
+        } else {
+            prompt = legacyPrompt.isEmpty ? AssistantCard.defaultPrompt : state.characterCardCreationAssistantPrompt
+        }
         let userName = resolvedUserName(state)
         let systemPrompt = [
             prompt,
@@ -420,20 +427,28 @@ final class ConversationEngine {
         latestAssistantText: String = "",
         phase: CompressionProcessingPhase = .beforeReasoner
     ) -> [PromptModeConfig] {
-        guard let roleCard = state.activeRoleCard else { return state.promptModes }
+        guard let roleCard = state.activeRoleCard,
+              let activeMode = state.promptMode(for: roleCard)
+        else { return state.promptModes }
         let turn = currentCompressionTurn(state: state, latestUserInput: latestUserInput)
         return state.promptModes.map { mode in
-            guard mode.id == roleCard.promptModeId || mode.mode == roleCard.mode.rawValue else { return mode }
+            guard mode.id == activeMode.id else { return mode }
             var nextMode = mode
             nextMode.compressionProfiles = mode.compressionProfiles.map { profile in
                 guard profile.enabled else { return profile }
                 var nextProfile = profile
+                let uncompressedRoundCount = completedUncompressedRoundCount(
+                    state: state,
+                    latestUserInput: latestUserInput,
+                    profile: profile
+                )
                 let triggeredActions = effectiveCompressionTriggerActions(profile: profile).filter { action in
                     shouldTriggerCompression(
                         action: action,
                         profile: profile,
                         mode: mode,
                         turn: turn,
+                        uncompressedRoundCount: uncompressedRoundCount,
                         latestUserInput: latestUserInput,
                         latestAssistantText: latestAssistantText,
                         phase: phase
@@ -445,9 +460,53 @@ final class ConversationEngine {
                 } else {
                     return nextProfile
                 }
-                nextProfile.compressedThroughTurnNumber = turn
+                let progressTurn = triggeredActions
+                    .map {
+                        compressedThroughTurnNumber(
+                            state: state,
+                            latestUserInput: latestUserInput,
+                            profile: profile,
+                            action: $0,
+                            latestAssistantText: latestAssistantText,
+                            phase: phase
+                        )
+                    }
+                    .max() ?? turn
+                nextProfile.compressedThroughTurnNumber = progressTurn
                 nextProfile.updatedAt = Date()
                 return nextProfile
+            }
+            return nextMode
+        }
+    }
+
+    func resetCompressionRuntimeForNewConversation(
+        state: AppState,
+        roleCard: RoleCard
+    ) -> [PromptModeConfig] {
+        guard let activeMode = state.promptMode(for: roleCard) else { return state.promptModes }
+        return state.promptModes.map { mode in
+            guard mode.id == activeMode.id else { return mode }
+            var nextMode = mode
+            nextMode.compressionProfiles = mode.compressionProfiles.map(resetCompressionRuntime)
+            return nextMode
+        }
+    }
+
+    func repairCompressionRuntimeIfBeyondCurrentConversation(state: AppState) -> [PromptModeConfig] {
+        guard let roleCard = state.activeRoleCard,
+              let activeMode = state.promptMode(for: roleCard)
+        else { return state.promptModes }
+        let latestConversationTurn = state.conversation
+            .filter { $0.role == .user }
+            .map(\.turnNumber)
+            .max() ?? 0
+        return state.promptModes.map { mode in
+            guard mode.id == activeMode.id else { return mode }
+            var nextMode = mode
+            nextMode.compressionProfiles = mode.compressionProfiles.map { profile in
+                guard profile.compressedThroughTurnNumber > latestConversationTurn else { return profile }
+                return resetCompressionRuntime(profile)
             }
             return nextMode
         }
@@ -461,23 +520,44 @@ final class ConversationEngine {
     ) -> [CompressionAPIRequest] {
         guard let roleCard = state.activeRoleCard else { return [] }
         let turn = currentCompressionTurn(state: state, latestUserInput: latestUserInput)
-        guard let mode = state.promptModes.first(where: { $0.id == roleCard.promptModeId || $0.mode == roleCard.mode.rawValue }) else {
+        guard let mode = state.promptMode(for: roleCard) else {
             return []
         }
         return mode.compressionProfiles.enumerated().compactMap { profileIndex, profile in
             guard profile.enabled, profile.modelKind == .normal else { return nil }
+            let uncompressedRoundCount = completedUncompressedRoundCount(
+                state: state,
+                latestUserInput: latestUserInput,
+                profile: profile
+            )
             let triggeredActions = effectiveCompressionTriggerActions(profile: profile).filter { action in
                 action.enabled && action.action == .callAPI && shouldTriggerCompression(
                     action: action,
                     profile: profile,
                     mode: mode,
                     turn: turn,
+                    uncompressedRoundCount: uncompressedRoundCount,
                     latestUserInput: latestUserInput,
                     latestAssistantText: latestAssistantText,
                     phase: phase
                 )
             }
             guard let action = triggeredActions.first else { return nil }
+            let includeLatestUser = shouldIncludeLatestUserInCompression(
+                action: action,
+                profile: profile,
+                turn: turn,
+                latestUserInput: latestUserInput,
+                latestAssistantText: latestAssistantText,
+                phase: phase
+            )
+            let includeLatestAssistant = shouldIncludeLatestAssistantInCompression(
+                action: action,
+                profile: profile,
+                latestUserInput: latestUserInput,
+                latestAssistantText: latestAssistantText,
+                phase: phase
+            )
             return CompressionAPIRequest(
                 modeID: mode.id,
                 profileID: profile.id,
@@ -488,9 +568,23 @@ final class ConversationEngine {
                 keywordFollowupAction: action.keywordFollowupAction,
                 skipReasoner: shouldSkipReasoner(action: action, latestUserInput: latestUserInput, latestAssistantText: latestAssistantText, phase: phase),
                 turnNumber: turn,
-                compressedThroughTurnNumber: turn,
+                compressedThroughTurnNumber: compressedThroughTurnNumber(
+                    state: state,
+                    latestUserInput: latestUserInput,
+                    profile: profile,
+                    action: action,
+                    latestAssistantText: latestAssistantText,
+                    phase: phase
+                ),
                 previousSummary: profile.summary,
-                messages: compressionAPIMessages(state: state, mode: mode, profile: profile)
+                messages: compressionAPIMessages(
+                    state: state,
+                    mode: mode,
+                    profile: profile,
+                    latestUserInput: latestUserInput,
+                    includeLatestUser: includeLatestUser,
+                    includeLatestAssistant: includeLatestAssistant
+                )
             )
         }
     }
@@ -503,13 +597,18 @@ final class ConversationEngine {
     ) -> [CompressionImageRequest] {
         guard let roleCard = state.activeRoleCard else { return [] }
         let turn = currentCompressionTurn(state: state, latestUserInput: latestUserInput)
-        guard let mode = state.promptModes.first(where: { $0.id == roleCard.promptModeId || $0.mode == roleCard.mode.rawValue }) else {
+        guard let mode = state.promptMode(for: roleCard) else {
             return []
         }
         return mode.compressionProfiles.enumerated().flatMap { profileIndex, profile -> [CompressionImageRequest] in
             guard profile.enabled, profile.modelKind == .image else { return [] }
             var imageProfile = profile
             imageProfile.summary = ""
+            let uncompressedRoundCount = completedUncompressedRoundCount(
+                state: state,
+                latestUserInput: latestUserInput,
+                profile: profile
+            )
             return effectiveCompressionTriggerActions(profile: profile).filter { action in
                 action.enabled &&
                     action.action == .callAPI &&
@@ -519,6 +618,7 @@ final class ConversationEngine {
                         profile: profile,
                         mode: mode,
                         turn: turn,
+                        uncompressedRoundCount: uncompressedRoundCount,
                         latestUserInput: latestUserInput,
                         latestAssistantText: latestAssistantText,
                         phase: phase
@@ -532,8 +632,21 @@ final class ConversationEngine {
                     triggerActionID: action.id,
                     triggerActionName: action.name.isEmpty ? profile.name : action.name,
                     turnNumber: turn,
-                    compressedThroughTurnNumber: turn,
-                    messages: compressionAPIMessages(state: state, mode: mode, profile: imageProfile),
+                    compressedThroughTurnNumber: compressedThroughTurnNumber(
+                        state: state,
+                        latestUserInput: latestUserInput,
+                        profile: profile,
+                        action: action,
+                        latestAssistantText: latestAssistantText,
+                        phase: phase
+                    ),
+                    messages: imagePromptAPIMessages(
+                        state: state,
+                        mode: mode,
+                        profile: imageProfile,
+                        latestUserInput: latestUserInput,
+                        latestAssistantText: latestAssistantText
+                    ),
                     imageSettings: action.imageGeneration,
                     runsInParallel: action.keywordFollowupAction == .imageParallelReasoner
                 )
@@ -773,6 +886,7 @@ final class ConversationEngine {
         profile: CompressionProfile,
         mode: PromptModeConfig,
         turn: Int,
+        uncompressedRoundCount: Int,
         latestUserInput: String,
         latestAssistantText: String,
         phase: CompressionProcessingPhase
@@ -782,16 +896,120 @@ final class ConversationEngine {
         let alreadyCompressedCurrentTurn = profile.compressedThroughTurnNumber >= turn && turn > 0
         if triggers.everyTurn && !alreadyCompressedCurrentTurn { return true }
         if let targetTurn = action.turn, targetTurn == turn, profile.compressedThroughTurnNumber < targetTurn { return true }
-        if scheduledTurnMatches(triggers.turns, turn: turn, compressedThroughTurnNumber: profile.compressedThroughTurnNumber, interval: mode.dialogueContextRounds) {
+        if triggers.turns.contains(0) {
+            let alreadyStarted = !profile.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                profile.compressedThroughTurnNumber > 0
+            if !alreadyStarted && turn <= 1 {
+                return true
+            }
+        }
+        let scheduledTurns = triggers.turns.filter { $0 != 0 }
+        if scheduledTurnMatches(scheduledTurns, turn: turn, compressedThroughTurnNumber: profile.compressedThroughTurnNumber, interval: mode.dialogueContextRounds) {
             return true
         }
         if keywordTriggerMatches(action: action, triggers: triggers, latestUserInput: latestUserInput, latestAssistantText: latestAssistantText, phase: phase) {
             return true
         }
         if triggers.roundLimit {
-            return turn - profile.compressedThroughTurnNumber >= max(1, mode.dialogueContextRounds)
+            return uncompressedRoundCount >= max(1, mode.dialogueContextRounds)
         }
         return false
+    }
+
+    private func completedUncompressedRoundCount(
+        state: AppState,
+        latestUserInput: String,
+        profile: CompressionProfile
+    ) -> Int {
+        let latestUser = latestUserMessage(state: state, userInput: latestUserInput)
+        return completedDialogueRoundsBeforeLatestUser(state: state, latestUser: latestUser)
+            .filter { roundTurnNumber($0) > profile.compressedThroughTurnNumber }
+            .count
+    }
+
+    private func compressedThroughTurnNumber(
+        state: AppState,
+        latestUserInput: String,
+        profile: CompressionProfile,
+        action: CompressionTriggerAction,
+        latestAssistantText: String,
+        phase: CompressionProcessingPhase
+    ) -> Int {
+        let latestUser = latestUserMessage(state: state, userInput: latestUserInput)
+        let latestCompletedTurn = completedDialogueRoundsBeforeLatestUser(state: state, latestUser: latestUser)
+            .filter { roundTurnNumber($0) > profile.compressedThroughTurnNumber }
+            .map { roundTurnNumber($0) }
+            .max() ?? 0
+        let latestUserTurn = max(0, latestUser.turnNumber)
+        let includesLatestUser = shouldIncludeLatestUserInCompression(
+            action: action,
+            profile: profile,
+            turn: latestUserTurn,
+            latestUserInput: latestUserInput,
+            latestAssistantText: latestAssistantText,
+            phase: phase
+        )
+        return max(
+            profile.compressedThroughTurnNumber,
+            latestCompletedTurn,
+            includesLatestUser || action.action == .copyUserInput ? latestUserTurn : 0
+        )
+    }
+
+    private func shouldIncludeLatestUserInCompression(
+        action: CompressionTriggerAction,
+        profile: CompressionProfile,
+        turn: Int,
+        latestUserInput: String,
+        latestAssistantText: String,
+        phase: CompressionProcessingPhase
+    ) -> Bool {
+        let triggers = resolvedTriggerConfig(action: action, profile: profile)
+        if action.action == .copyUserInput || action.keywordFollowupAction.isImageGeneration {
+            return true
+        }
+        if triggers.everyTurn && profile.compressedThroughTurnNumber < turn {
+            return true
+        }
+        if triggers.turns.contains(0) {
+            let alreadyStarted = !profile.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                profile.compressedThroughTurnNumber > 0
+            if !alreadyStarted && turn <= 1 {
+                return true
+            }
+        }
+        if !triggers.turns.isEmpty {
+            return true
+        }
+        if keywordTriggerMatches(
+            action: action,
+            triggers: triggers,
+            latestUserInput: latestUserInput,
+            latestAssistantText: latestAssistantText,
+            phase: phase
+        ) {
+            return normalizedKeywordSource(triggers.keywordSource.isEmpty ? action.source : triggers.keywordSource) != "assistant" ||
+                phase == .afterAssistant
+        }
+        return false
+    }
+
+    private func shouldIncludeLatestAssistantInCompression(
+        action: CompressionTriggerAction,
+        profile: CompressionProfile,
+        latestUserInput: String,
+        latestAssistantText: String,
+        phase: CompressionProcessingPhase
+    ) -> Bool {
+        guard phase == .afterAssistant else { return false }
+        let triggers = resolvedTriggerConfig(action: action, profile: profile)
+        return keywordTriggerMatches(
+            action: action,
+            triggers: triggers,
+            latestUserInput: latestUserInput,
+            latestAssistantText: latestAssistantText,
+            phase: phase
+        )
     }
 
     private func shouldSkipReasoner(
@@ -955,12 +1173,24 @@ final class ConversationEngine {
         return boundaries.max() ?? 0
     }
 
-    private func compressionAPIMessages(state: AppState, mode: PromptModeConfig, profile: CompressionProfile) -> [ChatAPIMessage] {
+    private func compressionAPIMessages(
+        state: AppState,
+        mode: PromptModeConfig,
+        profile: CompressionProfile,
+        latestUserInput: String,
+        includeLatestUser: Bool,
+        includeLatestAssistant: Bool
+    ) -> [ChatAPIMessage] {
         let roleName = state.activeRoleCard?.name ?? ""
         let userName = resolvedUserName(state)
         let instruction = compressionPromptPreview(mode: mode, profile: profile, user: userName, role: roleName)
-        let context = state.conversation
-            .filter { $0.turnNumber > profile.compressedThroughTurnNumber }
+        let context = compressionContextMessages(
+            state: state,
+            profile: profile,
+            latestUserInput: latestUserInput,
+            includeLatestUser: includeLatestUser,
+            includeLatestAssistant: includeLatestAssistant
+        )
             .filter { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .map { message in
                 "# \(message.role.rawValue) turn \(message.turnNumber)\n\(message.content)"
@@ -976,6 +1206,29 @@ final class ConversationEngine {
             ChatAPIMessage(role: "user", content: "【上下文】\n\(context.isEmpty ? "無" : context)"),
             ChatAPIMessage(role: "user", content: "【目前模型內容】\n\(currentSummary)")
         ].compactMap { $0 }
+    }
+
+    private func compressionContextMessages(
+        state: AppState,
+        profile: CompressionProfile,
+        latestUserInput: String,
+        includeLatestUser: Bool,
+        includeLatestAssistant: Bool
+    ) -> [ConversationMessage] {
+        let latestUser = latestUserMessage(state: state, userInput: latestUserInput)
+        var messages = completedDialogueRoundsBeforeLatestUser(state: state, latestUser: latestUser)
+            .filter { roundTurnNumber($0) > profile.compressedThroughTurnNumber }
+            .flatMap { $0 }
+        if includeLatestUser {
+            messages.append(latestUser)
+        }
+        if includeLatestAssistant,
+           let latestUserIndex = state.conversation.lastIndex(where: { $0.id == latestUser.id }),
+           let assistant = state.conversation[(latestUserIndex + 1)..<state.conversation.endIndex]
+            .first(where: { $0.role == .assistant && !isModelInvisible($0) }) {
+            messages.append(assistant)
+        }
+        return messages
     }
 
     private func compressionRoleContext(state: AppState, profile: CompressionProfile) -> String {
@@ -994,6 +1247,78 @@ final class ConversationEngine {
             sections
         ].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n\n")
+    }
+
+    private func imagePromptAPIMessages(
+        state: AppState,
+        mode: PromptModeConfig,
+        profile: CompressionProfile,
+        latestUserInput: String,
+        latestAssistantText: String
+    ) -> [ChatAPIMessage] {
+        let roleName = state.activeRoleCard?.name ?? ""
+        let userName = resolvedUserName(state)
+        let instruction = compressionPromptPreview(mode: mode, profile: profile, user: userName, role: roleName)
+        let roleContext = imagePromptRoleContext(state: state, profile: profile)
+        let context = recentImagePromptContext(state: state, latestUserInput: latestUserInput, latestAssistantText: latestAssistantText)
+        return [
+            ChatAPIMessage(role: "system", content: instruction),
+            roleContext.isEmpty ? nil : ChatAPIMessage(role: "user", content: roleContext),
+            ChatAPIMessage(role: "user", content: "【上下文】\n\(context.isEmpty ? "無" : context)")
+        ].compactMap { $0 }
+    }
+
+    private func imagePromptRoleContext(state: AppState, profile: CompressionProfile) -> String {
+        guard let roleCard = state.activeRoleCard else { return "" }
+        let userName = resolvedUserName(state)
+        let roleName = roleCard.name
+        let sections = roleCard.customSections
+            .filter { $0.enabled && $0.includeInImagePrompt }
+            .map { section in
+                let name = renderTemplate(section.name, user: userName, role: roleName)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let content = renderTemplate(section.content, user: userName, role: roleName)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty || !content.isEmpty else { return "" }
+                return "\(name.isEmpty ? "自定義內容" : name):\(content)"
+            }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n")
+        if !sections.isEmpty {
+            return [
+                "繪圖角色卡資料",
+                roleName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "角色 1"
+                    : "角色:\(renderTemplate(roleName, user: userName, role: roleName))",
+                sections
+            ].joined(separator: "\n")
+        }
+        return profile.contextScope == .roleAndText ? compressionRoleContext(state: state, profile: profile) : ""
+    }
+
+    private func recentImagePromptContext(
+        state: AppState,
+        latestUserInput: String,
+        latestAssistantText: String
+    ) -> String {
+        let contextLimit = 5
+        var messages = state.conversation
+            .filter { !isModelInvisible($0) }
+            .filter { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let trimmedUserInput = latestUserInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedUserInput.isEmpty && messages.last(where: { $0.role == .user })?.content != trimmedUserInput {
+            messages.append(ConversationMessage(role: .user, content: trimmedUserInput, turnNumber: currentCompressionTurn(state: state, latestUserInput: trimmedUserInput)))
+        }
+        let trimmedAssistantText = latestAssistantText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedAssistantText.isEmpty && messages.last?.content != trimmedAssistantText {
+            messages.append(ConversationMessage(role: .assistant, content: trimmedAssistantText, turnNumber: currentCompressionTurn(state: state, latestUserInput: trimmedUserInput)))
+        }
+        return messages
+            .suffix(contextLimit * 2)
+            .map { message in
+                "# \(message.role.rawValue) turn \(message.turnNumber)\n\(message.content)"
+            }
+            .joined(separator: "\n\n----------------\n\n")
     }
 
     private func mergeCompressionSummary(currentSummary: String, completionText: String, profile: CompressionProfile) -> String {
@@ -1028,6 +1353,14 @@ final class ConversationEngine {
               let json = String(data: data, encoding: .utf8)
         else { return completion.isEmpty ? currentSummary : completion }
         return json
+    }
+
+    private func resetCompressionRuntime(_ profile: CompressionProfile) -> CompressionProfile {
+        var nextProfile = profile
+        nextProfile.summary = ""
+        nextProfile.compressedThroughTurnNumber = 0
+        nextProfile.updatedAt = Date()
+        return nextProfile
     }
 
     private func normalizedCompressionJSONState(
