@@ -47,26 +47,46 @@ enum VNTheme {
     static let textSecondary = Color(red: 0.78, green: 0.80, blue: 0.92)
 }
 
+private struct VisualNovelTabInsetHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+private extension EnvironmentValues {
+    var visualNovelTabInsetHeight: CGFloat {
+        get { self[VisualNovelTabInsetHeightKey.self] }
+        set { self[VisualNovelTabInsetHeightKey.self] = newValue }
+    }
+}
+
 struct RootView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var store: TimeTavernStore
     @State private var selectedTab: AppTab = .chat
     @State private var tabBarVisible = false
+    @State private var keyboardVisible = false
     @State private var tabResetIDs = TabResetIDs()
     static let usesCustomTabContentHost = true
     static let tabBarHiddenByDefault = true
+    static let hidesTabBarWhileKeyboardVisible = true
     static let repeatedTabTapResetsCurrentTab = true
+    static let usesSafeAreaTabInset = true
     private var shouldShowTabBar: Bool {
-        Self.shouldDisplayTabBar(selectedTab: selectedTab, tabBarVisible: tabBarVisible)
+        Self.shouldDisplayTabBar(
+            selectedTab: selectedTab,
+            tabBarVisible: tabBarVisible,
+            keyboardVisible: keyboardVisible
+        )
     }
 
     var body: some View {
         GeometryReader { proxy in
-            ZStack(alignment: .bottom) {
+            ZStack {
                 VisualNovelBackground()
                 TabContentHost(selectedTab: selectedTab, resetIDs: tabResetIDs)
-                    .padding(.bottom, shouldShowTabBar ? VisualNovelTabBar.contentAvoidanceHeight : 0)
+                    .environment(\.visualNovelTabInsetHeight, shouldShowTabBar ? VisualNovelTabBar.safeAreaInsetHeight : 0)
                     .animation(.spring(response: 0.34, dampingFraction: 0.88), value: shouldShowTabBar)
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
                 if shouldShowTabBar {
                     VisualNovelTabBar(
                         selectedTab: $selectedTab,
@@ -80,7 +100,7 @@ struct RootView: View {
                         }
                     )
                     .padding(.horizontal, 14)
-                    .padding(.top, 8)
+                    .padding(.top, 6)
                     .padding(.bottom, 8)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -117,10 +137,24 @@ struct RootView: View {
         .onChange(of: store.state.uiLanguage) { _, language in
             UIChineseTextConverter.activeLanguage = language
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                keyboardVisible = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                keyboardVisible = false
+            }
+        }
     }
 
     static func shouldDisplayTabBar(selectedTab: AppTab, tabBarVisible: Bool) -> Bool {
-        selectedTab != .chat || tabBarVisible
+        shouldDisplayTabBar(selectedTab: selectedTab, tabBarVisible: tabBarVisible, keyboardVisible: false)
+    }
+
+    static func shouldDisplayTabBar(selectedTab: AppTab, tabBarVisible: Bool, keyboardVisible: Bool) -> Bool {
+        !keyboardVisible && (selectedTab != .chat || tabBarVisible)
     }
 
     static func tabBarVisibleAfterSelecting(_ tab: AppTab) -> Bool {
@@ -436,6 +470,7 @@ struct VNGlassCard<Content: View>: View {
     var cornerRadius: CGFloat = 22
     var accentOpacity: Double = 0.42
     var content: Content
+    static var decorativeChromeIgnoresHitTesting: Bool { true }
 
     init(cornerRadius: CGFloat = 22, accentOpacity: Double = 0.42, @ViewBuilder content: () -> Content) {
         self.cornerRadius = cornerRadius
@@ -462,6 +497,7 @@ struct VNGlassCard<Content: View>: View {
                         ),
                         lineWidth: 1
                     )
+                    .allowsHitTesting(false)
             )
             .shadow(color: VNTheme.ink.opacity(0.36), radius: 20, y: 12)
     }
@@ -471,6 +507,7 @@ struct VNGlassRoundedBackground: View {
     var cornerRadius: CGFloat
     var fill: Color
     var materialOpacity: Double
+    static let ignoresHitTesting = true
 
     var body: some View {
         ZStack {
@@ -481,12 +518,14 @@ struct VNGlassRoundedBackground: View {
                 .opacity(materialOpacity)
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .allowsHitTesting(false)
     }
 }
 
 struct VNGlassCapsuleBackground: View {
     var fill: Color
     var materialOpacity: Double
+    static let ignoresHitTesting = true
 
     var body: some View {
         ZStack {
@@ -497,6 +536,7 @@ struct VNGlassCapsuleBackground: View {
                 .opacity(materialOpacity)
         }
         .clipShape(Capsule())
+        .allowsHitTesting(false)
     }
 }
 
@@ -506,8 +546,14 @@ struct VisualNovelTabBar: View {
     @EnvironmentObject private var store: TimeTavernStore
     static let clipsBackgroundToRoundedShape = true
     static let reservesContentAboveBottomBar = true
-    static let contentAvoidanceHeight: CGFloat = 104
     static let reportsRepeatedTabSelection = true
+    static let usesFrostedGlassChrome = true
+    static let usesTransparentOverlayChrome = true
+    static let usesInternalGlassChrome = true
+    static let usesOuterGlassFrame = true
+    static let outerGlassFillOpacity: Double = 0.90
+    static let innerGlassFillOpacity: Double = 0.90
+    static let safeAreaInsetHeight: CGFloat = 88
 
     var body: some View {
         HStack(spacing: 6) {
@@ -530,14 +576,10 @@ struct VisualNovelTabBar: View {
                     .frame(maxWidth: .infinity)
                     .frame(height: 58)
                     .foregroundStyle(selectedTab == tab ? VNTheme.accentSoft : VNTheme.textSecondary.opacity(0.78))
-                    .background {
-                        if selectedTab == tab {
-                            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                .fill(VNTheme.accent.opacity(0.18))
-                                .shadow(color: VNTheme.accent.opacity(0.58), radius: 16, y: 0)
-                                .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                        }
-                    }
+                    .background(tabBackground(selected: selectedTab == tab))
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(tabBorder(selected: selectedTab == tab))
+                    .shadow(color: selectedTab == tab ? VNTheme.accent.opacity(0.34) : VNTheme.ink.opacity(0.14), radius: selectedTab == tab ? 10 : 6, y: 0)
                     .contentShape(Rectangle())
                 }
                 .frame(maxWidth: .infinity)
@@ -546,13 +588,36 @@ struct VisualNovelTabBar: View {
                 .accessibilityIdentifier("tab-\(tab.rawValue)")
             }
         }
-        .padding(6)
-        .background(VNGlassRoundedBackground(cornerRadius: 28, fill: VNTheme.ink.opacity(0.78), materialOpacity: 0.20))
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        .padding(8)
+        .background(
+            VNGlassRoundedBackground(
+                cornerRadius: 30,
+                fill: VNTheme.panel.opacity(Self.outerGlassFillOpacity),
+                materialOpacity: 0.26
+            )
         )
+        .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .stroke(Color.white.opacity(0.11), lineWidth: 0.8)
+                .allowsHitTesting(false)
+        )
+        .shadow(color: VNTheme.ink.opacity(0.24), radius: 16, y: 8)
+        .contentShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+    }
+
+    private func tabBackground(selected: Bool) -> some View {
+        VNGlassRoundedBackground(
+            cornerRadius: 18,
+            fill: selected ? VNTheme.accent.opacity(0.24) : VNTheme.ink.opacity(Self.innerGlassFillOpacity),
+            materialOpacity: selected ? 0.26 : 0.20
+        )
+    }
+
+    private func tabBorder(selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .stroke(selected ? VNTheme.accentSoft.opacity(0.30) : Color.white.opacity(0.08), lineWidth: 0.7)
+            .allowsHitTesting(false)
     }
 
     static func wasAlreadySelected(_ tab: AppTab, selectedTab: AppTab) -> Bool {
@@ -562,6 +627,7 @@ struct VisualNovelTabBar: View {
 
 struct ChatView: View {
     @EnvironmentObject private var store: TimeTavernStore
+    @Environment(\.visualNovelTabInsetHeight) private var tabInsetHeight
     @State private var showLogs = false
     @State private var showModelContent = false
     @State private var showRunTime = false
@@ -579,12 +645,18 @@ struct ChatView: View {
         isFocused
     }
     static let composerBottomPadding: CGFloat = 16
+    static let usesSafeAreaComposerInset = true
+    static let avoidsVisibleTabBar = true
     static let requiresRegenerateConfirmation = true
     static let opensAtCurrentConversationPosition = true
 
     static func initialScrollDestination(conversationIsEmpty: Bool, hasPerformedInitialScroll: Bool) -> ChatScrollDestination? {
         guard !conversationIsEmpty, !hasPerformedInitialScroll else { return nil }
         return .current
+    }
+
+    static func composerBottomPadding(tabInsetHeight: CGFloat) -> CGFloat {
+        composerBottomPadding + tabInsetHeight
     }
 
     var body: some View {
@@ -673,17 +745,18 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(Rectangle())
                     .simultaneousGesture(TapGesture().onEnded { _ in dismissComposerInput() })
-
-                    VisualNovelComposer(
-                        inputFocused: $composerFocused,
-                        scrollToStart: { requestScroll(.start) },
-                        scrollToCurrent: { requestScroll(.current) }
-                    )
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, Self.composerBottomPadding)
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VisualNovelComposer(
+                    inputFocused: $composerFocused,
+                    scrollToStart: { requestScroll(.start) },
+                    scrollToCurrent: { requestScroll(.current) }
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, Self.composerBottomPadding(tabInsetHeight: tabInsetHeight))
+            }
             .sheet(isPresented: $showLogs) { LogView() }
             .sheet(isPresented: $showModelContent) { ModelContentView() }
             .sheet(isPresented: $showRunTime) { RunTimeView() }
@@ -1706,6 +1779,12 @@ struct VisualNovelComposer: View {
         ComposerScrollItem(title: "回到最開始", destination: .start, systemImage: "arrow.up"),
         ComposerScrollItem(title: "回到現狀", destination: .current, systemImage: "arrow.down")
     ]
+    static let usesFrostedGlassChrome = true
+    static let usesTransparentOverlayChrome = true
+    static let usesInternalGlassChrome = true
+    static let usesOuterGlassFrame = true
+    static let outerGlassFillOpacity: Double = 0.90
+    static let innerGlassFillOpacity: Double = 0.90
     static let slashCommandItems: [ComposerInsertItem] = [
         ComposerInsertItem(title: "開始對話", text: "/ai_start", systemImage: "play.fill"),
         ComposerInsertItem(title: "目前狀態", text: "/ai_status", systemImage: "info.circle"),
@@ -1767,7 +1846,9 @@ struct VisualNovelComposer: View {
                     .font(.system(size: 18, weight: .bold))
                     .frame(width: 40, height: 44)
                     .foregroundStyle(VNTheme.accentSoft)
-                    .background(Circle().fill(Color.white.opacity(0.10)))
+                    .background(circleGlassBackground(active: true))
+                    .clipShape(Circle())
+                    .shadow(color: VNTheme.accent.opacity(0.24), radius: 5, y: 0)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(uiStatic("插入快捷內容"))
@@ -1778,7 +1859,22 @@ struct VisualNovelComposer: View {
                 .font(.body)
                 .foregroundStyle(.white)
                 .tint(VNTheme.accentSoft)
+                .padding(.horizontal, 14)
                 .padding(.vertical, 8)
+                .frame(minHeight: 44)
+                .background(
+                    VNGlassRoundedBackground(
+                        cornerRadius: 20,
+                        fill: VNTheme.ink.opacity(Self.innerGlassFillOpacity),
+                        materialOpacity: 0.20
+                    )
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.7)
+                        .allowsHitTesting(false)
+                )
             Button {
                 if store.isGenerating {
                     store.cancelGeneration()
@@ -1796,12 +1892,10 @@ struct VisualNovelComposer: View {
                 Image(systemName: store.isGenerating ? "stop.fill" : "paperplane.fill")
                     .font(.system(size: 17, weight: .bold))
                     .frame(width: 44, height: 44)
-                    .foregroundStyle(.white)
-                    .background(
-                        Circle()
-                            .fill(sendDisabled ? Color.white.opacity(0.12) : VNTheme.accent.opacity(0.88))
-                    )
-                    .shadow(color: sendDisabled ? .clear : VNTheme.accent.opacity(0.42), radius: 14, y: 4)
+                    .foregroundStyle(sendDisabled ? VNTheme.textSecondary.opacity(0.55) : VNTheme.accentSoft)
+                    .background(circleGlassBackground(active: !sendDisabled))
+                    .clipShape(Circle())
+                    .shadow(color: sendDisabled ? .clear : VNTheme.accent.opacity(0.24), radius: 5, y: 0)
             }
             .buttonStyle(.plain)
             .disabled(sendDisabled)
@@ -1810,25 +1904,39 @@ struct VisualNovelComposer: View {
             .animation(.easeInOut(duration: 0.2), value: sendDisabled)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(VNGlassRoundedBackground(cornerRadius: 28, fill: VNTheme.ink.opacity(0.82), materialOpacity: 0.20))
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .stroke(
-                    LinearGradient(
-                        colors: [VNTheme.accent.opacity(0.44), Color.white.opacity(0.13)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
+        .padding(.vertical, 10)
+        .background(
+            VNGlassRoundedBackground(
+                cornerRadius: 30,
+                fill: VNTheme.panel.opacity(Self.outerGlassFillOpacity),
+                materialOpacity: 0.28
+            )
         )
-        .shadow(color: VNTheme.ink.opacity(0.56), radius: 24, y: 14)
+        .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .stroke(Color.white.opacity(0.11), lineWidth: 0.8)
+                .allowsHitTesting(false)
+        )
+        .shadow(color: VNTheme.ink.opacity(0.28), radius: 18, y: 10)
+        .contentShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
         .offset(y: inputFocused ? -10 : 0)
         .padding(.bottom, inputFocused ? 12 : 0)
         .animation(.spring(response: 0.34, dampingFraction: 0.86), value: inputFocused)
         .accessibilityIdentifier("visualNovelComposer")
+    }
+
+    private func circleGlassBackground(active: Bool) -> some View {
+        ZStack {
+            Circle()
+                .fill(.ultraThinMaterial)
+                .opacity(active ? 0.12 : 0.08)
+            Circle()
+                .fill(active ? VNTheme.accent.opacity(0.32) : VNTheme.ink.opacity(Self.innerGlassFillOpacity))
+            Circle()
+                .stroke(active ? VNTheme.accentSoft.opacity(0.18) : Color.white.opacity(0.08), lineWidth: 0.7)
+        }
+        .allowsHitTesting(false)
     }
 
     private func insert(_ text: String) {
@@ -1864,6 +1972,57 @@ struct ComposerInsertItem: Identifiable, Hashable {
     var id: String { text }
 }
 
+struct VNGlassSearchField: View {
+    @Binding var text: String
+    var prompt: String
+    static let usesFrostedGlassChrome = true
+    static let usesTransparentOverlayChrome = true
+    static let usesInternalGlassChrome = true
+    static let glassFillOpacity: Double = 0.46
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.92))
+            TextField(prompt, text: $text)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .foregroundStyle(.white)
+                .tint(VNTheme.accentSoft)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(VNTheme.textSecondary.opacity(0.76))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(uiStatic("清除搜尋"))
+            }
+        }
+        .font(.body)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 13)
+        .background(
+            VNGlassRoundedBackground(
+                cornerRadius: 24,
+                fill: VNTheme.panel.opacity(Self.glassFillOpacity),
+                materialOpacity: 0.24
+            )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 0.7)
+                .allowsHitTesting(false)
+        )
+        .contentShape(Rectangle())
+        .accessibilityIdentifier("charactersGlassSearchField")
+    }
+}
+
 struct ComposerScrollItem: Identifiable, Hashable {
     var title: String
     var destination: ChatScrollDestination
@@ -1878,17 +2037,18 @@ struct CharactersView: View {
     @State private var roleCardPendingDelete: RoleCard?
     @State private var assistantCardPendingDelete: AssistantCard?
     @State private var showRoleCardImporter = false
-    @State private var query = ""
     static let separatesRoleCardsAndAssistantCards = true
     static let exposesRoleCardDeleteAction = true
     static let confirmsRoleCardDeletion = true
     static let supportsCustomAssistantCards = true
     static let exposesRoleCardImportAction = true
     static let roleCardImportSymbolName = "person.crop.square"
+    static let usesInlineGlassSearch = false
+    static let searchFieldOverlaysListContent = false
+    static let searchFieldSharesActionSection = false
 
     var filteredCards: [RoleCard] {
-        guard !query.isEmpty else { return store.state.roleCards }
-        return store.state.roleCards.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        store.state.roleCards
     }
 
     private var deleteConfirmationPresented: Binding<Bool> {
@@ -1973,7 +2133,6 @@ struct CharactersView: View {
                 }
             }
             .visualNovelListChrome()
-            .searchable(text: $query, prompt: uiStatic("搜尋角色"))
             .navigationTitle(uiStatic("角色"))
             .fileImporter(isPresented: $showRoleCardImporter, allowedContentTypes: AppImportTarget.roleCard.allowedContentTypes) { result in
                 handleRoleCardImportResult(result)
@@ -3322,22 +3481,16 @@ struct StudioView: View {
     }
 
     @State private var mode: StudioMode = .prompt
+    static let usesCustomModeSwitcher = true
+    static let integratesModeSwitcherInScrollContent = true
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 12) {
-                VNGlassCard(cornerRadius: 20, accentOpacity: 0.34) {
-                    Picker(uiStatic("工房"), selection: $mode) {
-                        ForEach(StudioMode.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                .padding(.horizontal)
-                .padding(.top, 8)
+            Group {
                 if mode == .prompt {
-                    PromptLabView()
+                    PromptLabView(studioMode: $mode)
                 } else {
-                    NovelAIView()
+                    NovelAIView(studioMode: $mode)
                 }
             }
             .navigationTitle(uiStatic("工房"))
@@ -3348,14 +3501,83 @@ struct StudioView: View {
     }
 }
 
+struct StudioModeSwitcher: View {
+    @Binding var mode: StudioView.StudioMode
+    static let usesExplicitButtons = true
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(StudioView.StudioMode.allCases) { item in
+                Button {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                        mode = Self.modeAfterTap(current: mode, tapped: item)
+                    }
+                } label: {
+                    tabLabel(for: item)
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .accessibilityLabel(uiStatic(item.rawValue))
+                .accessibilityAddTraits(.isButton)
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func tabLabel(for item: StudioView.StudioMode) -> some View {
+        let selected = mode == item
+        return Text(uiStatic(item.rawValue))
+            .font(.system(size: 14, weight: .bold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
+            .foregroundStyle(selected ? Color.white : VNTheme.textSecondary)
+            .background(tabBackground(selected: selected))
+            .overlay(tabBorder(selected: selected))
+            .contentShape(Rectangle())
+    }
+
+    private func tabBackground(selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(selected ? VNTheme.accent.opacity(0.30) : VNTheme.ink.opacity(0.42))
+    }
+
+    private func tabBorder(selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .stroke(selected ? VNTheme.accent.opacity(0.52) : Color.white.opacity(0.12), lineWidth: 1)
+    }
+
+    static func modeAfterTap(current: StudioView.StudioMode, tapped: StudioView.StudioMode) -> StudioView.StudioMode {
+        tapped
+    }
+}
+
+struct StudioModeSwitcherSection: View {
+    @Binding var mode: StudioView.StudioMode
+    static let scrollsWithPageContent = true
+
+    var body: some View {
+        Section {
+            VNGlassCard(cornerRadius: 20, accentOpacity: 0.34) {
+                StudioModeSwitcher(mode: $mode)
+            }
+            .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+            .listRowBackground(Color.clear)
+        }
+    }
+}
+
 struct PromptLabView: View {
     @EnvironmentObject private var store: TimeTavernStore
+    @Binding var studioMode: StudioView.StudioMode
     @State private var showModeImporter = false
     static let showsCompressionQuickSection = false
     static let exposesPromptModeImportAction = true
 
     var body: some View {
         List {
+            StudioModeSwitcherSection(mode: $studioMode)
             Section(uiStatic("模式")) {
                 ForEach($store.state.promptModes) { $mode in
                     NavigationLink {
@@ -4092,32 +4314,23 @@ struct PromptPreviewView: View {
 
 struct NovelAIView: View {
     @EnvironmentObject private var store: TimeTavernStore
+    @Binding var studioMode: StudioView.StudioMode
     @State private var page: NovelAIStudioPage = .settings
 
     var body: some View {
-        VStack(spacing: 10) {
-            NovelAIStudioTabBar(page: $page)
-            .padding(.horizontal)
-            .padding(.top, 2)
-            .padding(.bottom, 8)
-            .zIndex(2)
-
-            Group {
-                switch page {
-                case .settings:
-                    NovelAISettingsPanel(settings: $store.state.novelAIStudioSettings)
-                case .prompt:
-                    NovelAIPromptPanel(settings: $store.state.novelAIStudioSettings)
-                case .reference:
-                    NovelAIReferencePanel(settings: $store.state.novelAIStudioSettings)
-                case .output:
-                    NovelAIOutputPanel(settings: $store.state.novelAIStudioSettings)
-                case .history:
-                    NovelAIHistoryPanel()
-                }
+        Group {
+            switch page {
+            case .settings:
+                NovelAISettingsPanel(studioMode: $studioMode, page: $page, settings: $store.state.novelAIStudioSettings)
+            case .prompt:
+                NovelAIPromptPanel(studioMode: $studioMode, page: $page, settings: $store.state.novelAIStudioSettings)
+            case .reference:
+                NovelAIReferencePanel(studioMode: $studioMode, page: $page, settings: $store.state.novelAIStudioSettings)
+            case .output:
+                NovelAIOutputPanel(studioMode: $studioMode, page: $page, settings: $store.state.novelAIStudioSettings)
+            case .history:
+                NovelAIHistoryPanel(studioMode: $studioMode, page: $page)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .zIndex(0)
         }
         .background(VisualNovelBackground())
         .onDisappear { store.persist() }
@@ -4161,48 +4374,69 @@ enum NovelAIStudioPage: String, CaseIterable, Identifiable {
 
 struct NovelAIStudioTabBar: View {
     @Binding var page: NovelAIStudioPage
+    static let scrollsWithPageContent = true
+    static let usesExplicitButtons = true
 
     var body: some View {
         HStack(spacing: 4) {
             ForEach(NovelAIStudioPage.allCases) { item in
-                VStack(spacing: 3) {
-                    Image(systemName: item.systemImage)
-                        .font(.system(size: 13, weight: .bold))
-                    Text(uiStatic(item.shortTitle))
-                        .font(.system(size: 10, weight: .bold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 58)
-                .foregroundStyle(page == item ? VNTheme.accentSoft : VNTheme.textSecondary)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(page == item ? VNTheme.accent.opacity(0.20) : VNTheme.ink.opacity(0.45))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(page == item ? VNTheme.accent.opacity(0.48) : Color.white.opacity(0.12), lineWidth: 1)
-                )
-                .contentShape(Rectangle())
-                .highPriorityGesture(
-                    TapGesture().onEnded {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                            page = item
-                        }
-                    }
-                )
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(uiStatic(item.rawValue))
-                .accessibilityAddTraits(.isButton)
-                .accessibilityAction {
+                Button {
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
                         page = item
                     }
+                } label: {
+                    tabLabel(for: item)
                 }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(uiStatic(item.rawValue))
+                .accessibilityAddTraits(.isButton)
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func tabLabel(for item: NovelAIStudioPage) -> some View {
+        let selected = page == item
+        return VStack(spacing: 3) {
+            Image(systemName: item.systemImage)
+                .font(.system(size: 13, weight: .bold))
+            Text(uiStatic(item.shortTitle))
+                .font(.system(size: 10, weight: .bold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 58)
+        .foregroundStyle(selected ? VNTheme.accentSoft : VNTheme.textSecondary)
+        .background(tabBackground(selected: selected))
+        .overlay(tabBorder(selected: selected))
+        .contentShape(Rectangle())
+    }
+
+    private func tabBackground(selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(selected ? VNTheme.accent.opacity(0.20) : VNTheme.ink.opacity(0.45))
+    }
+
+    private func tabBorder(selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .stroke(selected ? VNTheme.accent.opacity(0.48) : Color.white.opacity(0.12), lineWidth: 1)
+    }
+}
+
+struct NovelAIStudioTabSection: View {
+    @Binding var page: NovelAIStudioPage
+
+    var body: some View {
+        Section {
+            VNGlassCard(cornerRadius: 20, accentOpacity: 0.24) {
+                NovelAIStudioTabBar(page: $page)
+            }
+            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 8, trailing: 16))
+            .listRowBackground(Color.clear)
+        }
     }
 }
 
@@ -4251,10 +4485,14 @@ enum NovelAIOptionLists {
 
 struct NovelAISettingsPanel: View {
     @EnvironmentObject private var store: TimeTavernStore
+    @Binding var studioMode: StudioView.StudioMode
+    @Binding var page: NovelAIStudioPage
     @Binding var settings: NovelAIStudioSettings
 
     var body: some View {
         Form {
+            StudioModeSwitcherSection(mode: $studioMode)
+            NovelAIStudioTabSection(page: $page)
             Section(uiStatic("狀態")) {
                 Button(uiStatic("讀取 status / balance")) { store.testNovelAI() }
                 if !store.statusText.isEmpty {
@@ -4288,10 +4526,14 @@ struct NovelAISettingsPanel: View {
 }
 
 struct NovelAIPromptPanel: View {
+    @Binding var studioMode: StudioView.StudioMode
+    @Binding var page: NovelAIStudioPage
     @Binding var settings: NovelAIStudioSettings
 
     var body: some View {
         Form {
+            StudioModeSwitcherSection(mode: $studioMode)
+            NovelAIStudioTabSection(page: $page)
             Section("Base Prompt") {
                 Text(uiStatic("可用 ||片段名|| 插入固定或隨機片段；舊版 {{片段名}} 只會展開 Random Prompt。Character Prompt 會送入 NovelAI V4 角色 caption，不會混入 Base Prompt。"))
                     .font(.caption)
@@ -4484,10 +4726,14 @@ struct NovelAICharacterPromptSection: View {
 }
 
 struct NovelAIReferencePanel: View {
+    @Binding var studioMode: StudioView.StudioMode
+    @Binding var page: NovelAIStudioPage
     @Binding var settings: NovelAIStudioSettings
 
     var body: some View {
         Form {
+            StudioModeSwitcherSection(mode: $studioMode)
+            NovelAIStudioTabSection(page: $page)
             NovelAITargetedImageImportSection(settings: $settings)
             NovelAIReferenceSection(title: "Vibe Transfer", references: $settings.vibeTransferImages, type: "vibe")
             Section("Image2Image") {
@@ -4730,10 +4976,14 @@ struct ImagePickerButton: View {
 
 struct NovelAIOutputPanel: View {
     @EnvironmentObject private var store: TimeTavernStore
+    @Binding var studioMode: StudioView.StudioMode
+    @Binding var page: NovelAIStudioPage
     @Binding var settings: NovelAIStudioSettings
 
     var body: some View {
         Form {
+            StudioModeSwitcherSection(mode: $studioMode)
+            NovelAIStudioTabSection(page: $page)
             Section(uiStatic("尺寸")) {
                 Picker("Preset", selection: $settings.sizePreset) {
                     Text("Portrait").tag("portrait")
@@ -4854,28 +5104,33 @@ struct NovelAIOutputPanel: View {
 
 struct NovelAIHistoryPanel: View {
     @EnvironmentObject private var store: TimeTavernStore
+    @Binding var studioMode: StudioView.StudioMode
+    @Binding var page: NovelAIStudioPage
     @State private var previewImage: ImagePreviewItem?
     static let generatedImagesOpenPreviewOnTap = true
+    static let imageTapUsesGestureInsteadOfRowButton = true
+    static let deleteRequiresExplicitButtonTap = true
 
     var body: some View {
         List {
+            StudioModeSwitcherSection(mode: $studioMode)
+            NovelAIStudioTabSection(page: $page)
             ForEach(store.state.novelAIAlbum) { item in
                 VStack(alignment: .leading, spacing: 8) {
                     if let image = UIImage(data: item.imageData) {
-                        Button {
-                            previewImage = ImagePreviewItem(title: item.fileName, imageData: item.imageData)
-                        } label: {
-                            ZStack(alignment: .topTrailing) {
-                                Image(uiImage: image)
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(maxHeight: 260)
-                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                GeneratedImageZoomBadge()
-                                    .padding(8)
-                            }
+                        ZStack(alignment: .topTrailing) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxHeight: 260)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            GeneratedImageZoomBadge()
+                                .padding(8)
                         }
-                        .buttonStyle(.plain)
+                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .onTapGesture {
+                            previewImage = ImagePreviewItem(title: item.fileName, imageData: item.imageData)
+                        }
                         .accessibilityLabel(uiStatic("放大生成圖片"))
                     }
                     Text(item.prompt)
@@ -4898,6 +5153,7 @@ struct NovelAIHistoryPanel: View {
                             Label(uiStatic("刪除"), systemImage: "trash")
                         }
                         .font(.caption)
+                        .buttonStyle(.borderless)
                     }
                 }
             }

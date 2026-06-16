@@ -11,7 +11,9 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(AppTab.allCases.map { $0.title(in: .simplified) }, ["对话", "角色", "存档", "工房", "设定"])
         XCTAssertTrue(RootView.usesCustomTabContentHost)
         XCTAssertTrue(RootView.tabBarHiddenByDefault)
+        XCTAssertTrue(RootView.hidesTabBarWhileKeyboardVisible)
         XCTAssertTrue(RootView.repeatedTabTapResetsCurrentTab)
+        XCTAssertTrue(RootView.usesSafeAreaTabInset)
         XCTAssertFalse(RootView.shouldResetTabAfterTap(wasSelected: false))
         XCTAssertTrue(RootView.shouldResetTabAfterTap(wasSelected: true))
         XCTAssertTrue(TabContentHost.keepsInactiveTabsMounted)
@@ -22,15 +24,43 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(TabContentHost.opacity(for: .characters, selectedTab: .chat), 0)
         XCTAssertGreaterThan(TabContentHost.zIndex(for: .characters, selectedTab: .characters), TabContentHost.zIndex(for: .characters, selectedTab: .chat))
         XCTAssertTrue(VisualNovelTabBar.reportsRepeatedTabSelection)
+        XCTAssertTrue(VisualNovelTabBar.usesFrostedGlassChrome)
+        XCTAssertTrue(VisualNovelComposer.usesFrostedGlassChrome)
+        XCTAssertTrue(VisualNovelTabBar.usesTransparentOverlayChrome)
+        XCTAssertTrue(VisualNovelComposer.usesTransparentOverlayChrome)
+        XCTAssertTrue(VisualNovelTabBar.usesInternalGlassChrome)
+        XCTAssertTrue(VisualNovelComposer.usesInternalGlassChrome)
+        XCTAssertTrue(VisualNovelTabBar.usesOuterGlassFrame)
+        XCTAssertTrue(VisualNovelComposer.usesOuterGlassFrame)
+        XCTAssertGreaterThanOrEqual(VisualNovelTabBar.outerGlassFillOpacity, 0.88)
+        XCTAssertLessThanOrEqual(VisualNovelTabBar.outerGlassFillOpacity, 0.92)
+        XCTAssertGreaterThanOrEqual(VisualNovelComposer.outerGlassFillOpacity, 0.88)
+        XCTAssertLessThanOrEqual(VisualNovelComposer.outerGlassFillOpacity, 0.92)
+        XCTAssertGreaterThanOrEqual(VisualNovelTabBar.innerGlassFillOpacity, 0.88)
+        XCTAssertLessThanOrEqual(VisualNovelTabBar.innerGlassFillOpacity, 0.92)
+        XCTAssertGreaterThanOrEqual(VisualNovelComposer.innerGlassFillOpacity, 0.88)
+        XCTAssertLessThanOrEqual(VisualNovelComposer.innerGlassFillOpacity, 0.92)
+        XCTAssertFalse(CharactersView.usesInlineGlassSearch)
+        XCTAssertFalse(CharactersView.searchFieldOverlaysListContent)
+        XCTAssertFalse(CharactersView.searchFieldSharesActionSection)
         XCTAssertFalse(VisualNovelTabBar.wasAlreadySelected(.characters, selectedTab: .chat))
         XCTAssertTrue(VisualNovelTabBar.wasAlreadySelected(.characters, selectedTab: .characters))
         XCTAssertTrue(VisualNovelTabBar.clipsBackgroundToRoundedShape)
         XCTAssertTrue(VisualNovelTabBar.reservesContentAboveBottomBar)
-        XCTAssertGreaterThanOrEqual(VisualNovelTabBar.contentAvoidanceHeight, 96)
+        XCTAssertGreaterThan(VisualNovelTabBar.safeAreaInsetHeight, 0)
+        XCTAssertTrue(ChatView.usesSafeAreaComposerInset)
+        XCTAssertTrue(ChatView.avoidsVisibleTabBar)
         XCTAssertLessThan(ChatView.composerBottomPadding, 24)
+        XCTAssertEqual(
+            ChatView.composerBottomPadding(tabInsetHeight: VisualNovelTabBar.safeAreaInsetHeight),
+            ChatView.composerBottomPadding + VisualNovelTabBar.safeAreaInsetHeight
+        )
         XCTAssertFalse(RootView.shouldDisplayTabBar(selectedTab: .chat, tabBarVisible: false))
         XCTAssertTrue(RootView.shouldDisplayTabBar(selectedTab: .chat, tabBarVisible: true))
         XCTAssertTrue(RootView.shouldDisplayTabBar(selectedTab: .settings, tabBarVisible: false))
+        XCTAssertFalse(RootView.shouldDisplayTabBar(selectedTab: .chat, tabBarVisible: true, keyboardVisible: true))
+        XCTAssertFalse(RootView.shouldDisplayTabBar(selectedTab: .characters, tabBarVisible: true, keyboardVisible: true))
+        XCTAssertFalse(RootView.shouldDisplayTabBar(selectedTab: .settings, tabBarVisible: false, keyboardVisible: true))
         XCTAssertFalse(RootView.tabBarVisibleAfterSelecting(.chat))
         XCTAssertTrue(RootView.tabBarVisibleAfterSelecting(.characters))
         XCTAssertTrue(RootView.shouldRevealTabBar(startY: 760, containerHeight: 800, translation: CGSize(width: 0, height: -44)))
@@ -238,6 +268,23 @@ final class TimeTavernTests: XCTestCase {
 
         XCTAssertNil(PromptLabView.activeRolePromptModeID(state: state))
         XCTAssertEqual(PromptLabView.exportTargetModeID(state: state, selectedModeID: "multi"), "multi")
+    }
+
+    func testStudioModeSwitcherCanSelectNovelAIWithoutSegmentedPicker() {
+        XCTAssertTrue(StudioView.usesCustomModeSwitcher)
+        XCTAssertTrue(StudioView.integratesModeSwitcherInScrollContent)
+        XCTAssertTrue(StudioModeSwitcherSection.scrollsWithPageContent)
+        XCTAssertTrue(NovelAIStudioTabBar.scrollsWithPageContent)
+        XCTAssertTrue(NovelAIStudioTabBar.usesExplicitButtons)
+        XCTAssertTrue(StudioModeSwitcher.usesExplicitButtons)
+        XCTAssertEqual(
+            StudioModeSwitcher.modeAfterTap(current: .prompt, tapped: .novelAI),
+            .novelAI
+        )
+        XCTAssertEqual(
+            StudioModeSwitcher.modeAfterTap(current: .novelAI, tapped: .prompt),
+            .prompt
+        )
     }
 
     func testModelContentDoesNotShowAllModesWithoutActiveRoleCard() {
@@ -2779,6 +2826,8 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertEqual(store.state.novelAIAlbum.map(\.id), ["keep"])
         XCTAssertEqual(NovelAIHistoryPanel.itemsAfterDeleting(id: "keep", from: store.state.novelAIAlbum), [])
         XCTAssertTrue(NovelAIHistoryPanel.generatedImagesOpenPreviewOnTap)
+        XCTAssertTrue(NovelAIHistoryPanel.imageTapUsesGestureInsteadOfRowButton)
+        XCTAssertTrue(NovelAIHistoryPanel.deleteRequiresExplicitButtonTap)
     }
 
     func testNovelAIDeleteHelpersMatchWebVisibleDeleteButtons() {
