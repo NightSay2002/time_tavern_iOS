@@ -1455,6 +1455,12 @@ struct ConversationMessage: Codable, Identifiable, Hashable {
 }
 
 struct AILogEntry: Codable, Identifiable, Hashable {
+    static let storesBoundedRuntimePayloads = true
+    static let maxStoredRequestCharacters = 6000
+    static let maxStoredResponseCharacters = 6000
+    static let maxStoredReasoningCharacters = 2400
+    static let truncationNotice = "\n\n[內容過長，已只保留預覽以避免記憶體暴增。]"
+
     var id: String = UUID().uuidString
     var purpose: String = "chat"
     var model: String = ""
@@ -1514,13 +1520,13 @@ struct AILogEntry: Codable, Identifiable, Hashable {
         self.model = model
         self.temperature = temperature
         self.maxTokens = maxTokens
-        self.requestMessages = requestMessages
-        self.responseText = responseText.isEmpty ? responsePreview : responseText
-        self.debugReasoningContent = debugReasoningContent.isEmpty ? reasoningPreview : debugReasoningContent
+        self.requestMessages = Self.compactedMessages(requestMessages, maxTotalCharacters: Self.maxStoredRequestCharacters)
+        self.responseText = Self.truncated(responseText.isEmpty ? responsePreview : responseText, maxCharacters: Self.maxStoredResponseCharacters)
+        self.debugReasoningContent = Self.truncated(debugReasoningContent.isEmpty ? reasoningPreview : debugReasoningContent, maxCharacters: Self.maxStoredReasoningCharacters)
         self.usage = usage
-        self.requestPreview = requestPreview.isEmpty ? Self.preview(for: requestMessages) : requestPreview
-        self.responsePreview = responsePreview.isEmpty ? self.responseText.prefixString(1600) : responsePreview
-        self.reasoningPreview = reasoningPreview.isEmpty ? self.debugReasoningContent.prefixString(1600) : reasoningPreview
+        self.requestPreview = requestPreview.isEmpty ? Self.preview(for: self.requestMessages) : Self.truncated(requestPreview, maxCharacters: 1600)
+        self.responsePreview = responsePreview.isEmpty ? self.responseText.prefixString(1600) : Self.truncated(responsePreview, maxCharacters: 1600)
+        self.reasoningPreview = reasoningPreview.isEmpty ? self.debugReasoningContent.prefixString(1600) : Self.truncated(reasoningPreview, maxCharacters: 1600)
         self.usageSummary = usageSummary.isEmpty ? (usage?.formattedSummary ?? "") : usageSummary
         self.error = error
         self.status = status
@@ -1534,19 +1540,73 @@ struct AILogEntry: Codable, Identifiable, Hashable {
         model = try container.decodeIfPresent(String.self, forKey: .model) ?? ""
         temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
         maxTokens = try container.decodeIfPresent(Int.self, forKey: .maxTokens)
-        requestMessages = try container.decodeIfPresent([ChatAPIMessage].self, forKey: .requestMessages) ?? []
-        responseText = try container.decodeIfPresent(String.self, forKey: .responseText) ??
+        let decodedRequestMessages = try container.decodeIfPresent([ChatAPIMessage].self, forKey: .requestMessages) ?? []
+        requestMessages = Self.compactedMessages(decodedRequestMessages, maxTotalCharacters: Self.maxStoredRequestCharacters)
+        let decodedResponseText = try container.decodeIfPresent(String.self, forKey: .responseText) ??
             (try container.decodeIfPresent(String.self, forKey: .responsePreview) ?? "")
-        debugReasoningContent = try container.decodeIfPresent(String.self, forKey: .debugReasoningContent) ??
+        responseText = Self.truncated(decodedResponseText, maxCharacters: Self.maxStoredResponseCharacters)
+        let decodedReasoning = try container.decodeIfPresent(String.self, forKey: .debugReasoningContent) ??
             (try container.decodeIfPresent(String.self, forKey: .reasoningPreview) ?? "")
+        debugReasoningContent = Self.truncated(decodedReasoning, maxCharacters: Self.maxStoredReasoningCharacters)
         usage = try container.decodeIfPresent(AIUsage.self, forKey: .usage)
         requestPreview = try container.decodeIfPresent(String.self, forKey: .requestPreview) ?? Self.preview(for: requestMessages)
         responsePreview = try container.decodeIfPresent(String.self, forKey: .responsePreview) ?? responseText.prefixString(1600)
         reasoningPreview = try container.decodeIfPresent(String.self, forKey: .reasoningPreview) ?? debugReasoningContent.prefixString(1600)
+        requestPreview = Self.truncated(requestPreview, maxCharacters: 1600)
+        responsePreview = Self.truncated(responsePreview, maxCharacters: 1600)
+        reasoningPreview = Self.truncated(reasoningPreview, maxCharacters: 1600)
         usageSummary = try container.decodeIfPresent(String.self, forKey: .usageSummary) ?? (usage?.formattedSummary ?? "")
         error = try container.decodeIfPresent(String.self, forKey: .error) ?? ""
         status = try container.decodeIfPresent(String.self, forKey: .status) ?? "success"
         createdAt = Self.decodeCreatedAt(from: container) ?? Date()
+    }
+
+    func compactedForRuntimeStorage() -> AILogEntry {
+        AILogEntry(
+            id: id,
+            purpose: purpose,
+            model: model,
+            temperature: temperature,
+            maxTokens: maxTokens,
+            requestMessages: requestMessages,
+            responseText: responseText,
+            debugReasoningContent: debugReasoningContent,
+            usage: usage,
+            requestPreview: requestPreview,
+            responsePreview: responsePreview,
+            reasoningPreview: reasoningPreview,
+            usageSummary: usageSummary,
+            error: error,
+            status: status,
+            createdAt: createdAt
+        )
+    }
+
+    static func compactedMessages(_ messages: [ChatAPIMessage], maxTotalCharacters: Int) -> [ChatAPIMessage] {
+        guard maxTotalCharacters > 0 else { return [] }
+        var remaining = maxTotalCharacters
+        var output: [ChatAPIMessage] = []
+        for message in messages {
+            guard remaining > 0 else { break }
+            let reservedForNotice = truncationNotice.count
+            let limit = max(0, remaining)
+            let content = truncated(message.content, maxCharacters: max(limit, reservedForNotice + 1))
+            remaining -= min(message.content.count, limit)
+            output.append(ChatAPIMessage(role: message.role, content: content))
+            if content.count > limit {
+                remaining = 0
+            }
+        }
+        if output.count < messages.count {
+            output.append(ChatAPIMessage(role: "system", content: "[AI Log 已省略 \(messages.count - output.count) 則過長訊息以節省記憶體。]"))
+        }
+        return output
+    }
+
+    static func truncated(_ text: String, maxCharacters: Int) -> String {
+        guard maxCharacters > 0, text.count > maxCharacters else { return text }
+        let headCount = max(0, maxCharacters - truncationNotice.count)
+        return String(text.prefix(headCount)) + truncationNotice
     }
 
     private static func preview(for messages: [ChatAPIMessage]) -> String {

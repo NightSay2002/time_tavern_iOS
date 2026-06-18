@@ -104,6 +104,8 @@ final class TimeTavernStore: ObservableObject {
     private var generationTask: Task<Void, Never>?
     private var novelAIGenerationTask: Task<Void, Never>?
     private var deepSeekChatKeyCursor = 0
+    nonisolated static let storesCompactedRuntimePayloads = true
+    nonisolated static let maximumRuntimeAILogs = 80
     static let compressionJSONMaxAttempts = 2
     nonisolated static let streamingUIFlushCharacterThreshold = 100
 
@@ -151,7 +153,9 @@ final class TimeTavernStore: ObservableObject {
         guard database == nil else { return }
         database = AppDatabase(context: modelContext)
         state = database?.loadState() ?? AppState()
+        compactRuntimePayloadsForStorage()
         repairCompressionRuntimeIfNeeded()
+        persist()
         deepSeekKey = (try? secretStore.read(.deepSeekAPIKey)) ?? ""
         deepSeekProcessingKeys = DeepSeekKeySet.decodeProcessingKeys((try? secretStore.read(.deepSeekProcessingAPIKeys)) ?? "")
         novelAIKey = (try? secretStore.read(.novelAIAPIKey)) ?? ""
@@ -183,6 +187,7 @@ final class TimeTavernStore: ObservableObject {
     }
 
     func persist() {
+        compactRuntimePayloadsForStorage()
         state.updatedAt = Date()
         do {
             try database?.saveState(state)
@@ -769,11 +774,17 @@ final class TimeTavernStore: ObservableObject {
     }
 
     private func captureNarrativeSnapshot() -> ConversationTurnSnapshot {
-        ConversationTurnSnapshot(state: state)
+        ConversationTurnSnapshot(
+            promptModes: Self.compactedPromptModesForSnapshot(state.promptModes),
+            timeTracking: state.timeTracking
+        )
     }
 
     private func applyNarrativeSnapshot(_ snapshot: ConversationTurnSnapshot) {
-        state.promptModes = snapshot.promptModes
+        state.promptModes = Self.promptModesByApplyingRuntimeSnapshot(
+            snapshot.promptModes,
+            to: state.promptModes
+        )
         state.timeTracking = snapshot.timeTracking
     }
 
@@ -811,7 +822,7 @@ final class TimeTavernStore: ObservableObject {
         let user = state.conversation[..<assistantIndex].last(where: { $0.role == .user })
         guard let user else { return }
         guard let userIndex = state.conversation.firstIndex(where: { $0.id == user.id }) else { return }
-        state.savedSessions.insert(conversationEngine.branchSession(from: state, name: "重跑前備份"), at: 0)
+        state.savedSessions.insert(Self.compactedSession(conversationEngine.branchSession(from: state, name: "重跑前備份")), at: 0)
         restoreNarrativeStateForReplay(targetIndex: userIndex)
         if state.conversation[userIndex].stateBeforeTurnSnapshot == nil {
             state.conversation[userIndex].stateBeforeTurnSnapshot = captureNarrativeSnapshot()
@@ -827,7 +838,7 @@ final class TimeTavernStore: ObservableObject {
             return
         }
         guard let index = state.conversation.firstIndex(where: { $0.id == message.id }) else { return }
-        state.savedSessions.insert(conversationEngine.branchSession(from: state, name: "分支前備份"), at: 0)
+        state.savedSessions.insert(Self.compactedSession(conversationEngine.branchSession(from: state, name: "分支前備份")), at: 0)
         restoreNarrativeStateForReplay(targetIndex: index)
         state.conversation.removeSubrange(index..<state.conversation.endIndex)
         persist()
@@ -894,20 +905,21 @@ final class TimeTavernStore: ObservableObject {
     }
 
     func saveSession(named name: String) {
-        let session = conversationEngine.branchSession(
+        let session = Self.compactedSession(conversationEngine.branchSession(
             from: state,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未命名存檔" : name
-        )
+        ))
         state.savedSessions.insert(session, at: 0)
         persist()
     }
 
     func load(session: SavedSession) {
-        state.roleCards = session.roleCards
-        state.promptModes = session.promptModes
-        state.activeRoleCardId = session.activeRoleCardId
-        state.conversation = session.conversation
-        state.aiLogs = session.aiLogs
+        let compactedSession = Self.compactedSession(session)
+        state.roleCards = compactedSession.roleCards
+        state.promptModes = compactedSession.promptModes
+        state.activeRoleCardId = compactedSession.activeRoleCardId
+        state.conversation = compactedSession.conversation
+        state.aiLogs = compactedSession.aiLogs
         persist()
     }
 
@@ -1034,8 +1046,8 @@ final class TimeTavernStore: ObservableObject {
             } else {
                 restored = try bundledWebDefaultsService.loadDefaults()
             }
-            let backup = conversationEngine.branchSession(from: state, name: "還原預設前備份")
-            let preservedSessions = state.savedSessions
+            let backup = Self.compactedSession(conversationEngine.branchSession(from: state, name: "還原預設前備份"))
+            let preservedSessions = state.savedSessions.map(Self.compactedSession)
             let preservedAlbum = state.novelAIAlbum
             let preservedLogs = state.aiLogs
 
@@ -1247,9 +1259,87 @@ final class TimeTavernStore: ObservableObject {
         if state.conversation.count > 500 {
             state.conversation = Array(state.conversation.suffix(500))
         }
-        if state.aiLogs.count > 200 {
-            state.aiLogs = Array(state.aiLogs.prefix(200))
+        if state.aiLogs.count > Self.maximumRuntimeAILogs {
+            state.aiLogs = Array(state.aiLogs.prefix(Self.maximumRuntimeAILogs))
         }
+        compactRuntimePayloadsForStorage()
+    }
+
+    private func compactRuntimePayloadsForStorage() {
+        state.aiLogs = state.aiLogs
+            .prefix(Self.maximumRuntimeAILogs)
+            .map { $0.compactedForRuntimeStorage() }
+        for index in state.conversation.indices {
+            state.conversation[index].stateBeforeTurnSnapshot = Self.compactedSnapshot(state.conversation[index].stateBeforeTurnSnapshot)
+            state.conversation[index].stateAfterTurnSnapshot = Self.compactedSnapshot(state.conversation[index].stateAfterTurnSnapshot)
+        }
+        state.savedSessions = state.savedSessions.map(Self.compactedSession)
+    }
+
+    nonisolated static func compactedSession(_ session: SavedSession) -> SavedSession {
+        var compacted = session
+        compacted.conversation = compactedConversation(session.conversation)
+        compacted.aiLogs = session.aiLogs
+            .prefix(maximumRuntimeAILogs)
+            .map { $0.compactedForRuntimeStorage() }
+        return compacted
+    }
+
+    nonisolated static func compactedConversation(_ conversation: [ConversationMessage]) -> [ConversationMessage] {
+        conversation.map { message in
+            var compacted = message
+            compacted.stateBeforeTurnSnapshot = compactedSnapshot(message.stateBeforeTurnSnapshot)
+            compacted.stateAfterTurnSnapshot = compactedSnapshot(message.stateAfterTurnSnapshot)
+            return compacted
+        }
+    }
+
+    nonisolated static func compactedSnapshot(_ snapshot: ConversationTurnSnapshot?) -> ConversationTurnSnapshot? {
+        guard let snapshot else { return nil }
+        return ConversationTurnSnapshot(
+            promptModes: compactedPromptModesForSnapshot(snapshot.promptModes),
+            timeTracking: snapshot.timeTracking
+        )
+    }
+
+    nonisolated static func compactedPromptModesForSnapshot(_ modes: [PromptModeConfig]) -> [PromptModeConfig] {
+        modes.map { mode in
+            var compacted = mode
+            compacted.mainRules = ""
+            compacted.outputRules = ""
+            compacted.reasonerHistory = ""
+            compacted.reasonerHistoryConfig = ReasonerHistoryConfig()
+            compacted.contextCompression = CompressionContextConfig()
+            compacted.compressionProfiles = mode.compressionProfiles.map { profile in
+                var compactedProfile = profile
+                compactedProfile.contextCompression = CompressionContextConfig()
+                compactedProfile.mainRules = ""
+                compactedProfile.models = []
+                compactedProfile.triggerActions = []
+                compactedProfile.appendTerms = []
+                return compactedProfile
+            }
+            return compacted
+        }
+    }
+
+    nonisolated static func promptModesByApplyingRuntimeSnapshot(
+        _ snapshotModes: [PromptModeConfig],
+        to currentModes: [PromptModeConfig]
+    ) -> [PromptModeConfig] {
+        guard !snapshotModes.isEmpty else { return currentModes }
+        var output = currentModes
+        for snapshotMode in snapshotModes {
+            guard let modeIndex = output.firstIndex(where: { $0.id == snapshotMode.id }) else { continue }
+            output[modeIndex].dialogueContextRounds = snapshotMode.dialogueContextRounds
+            for snapshotProfile in snapshotMode.compressionProfiles {
+                guard let profileIndex = output[modeIndex].compressionProfiles.firstIndex(where: { $0.id == snapshotProfile.id }) else { continue }
+                output[modeIndex].compressionProfiles[profileIndex].summary = snapshotProfile.summary
+                output[modeIndex].compressionProfiles[profileIndex].compressedThroughTurnNumber = snapshotProfile.compressedThroughTurnNumber
+                output[modeIndex].compressionProfiles[profileIndex].updatedAt = snapshotProfile.updatedAt
+            }
+        }
+        return output
     }
 }
 

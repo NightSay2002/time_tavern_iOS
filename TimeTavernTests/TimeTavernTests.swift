@@ -50,11 +50,22 @@ final class TimeTavernTests: XCTestCase {
         XCTAssertGreaterThan(VisualNovelTabBar.safeAreaInsetHeight, 0)
         XCTAssertTrue(ChatView.usesSafeAreaComposerInset)
         XCTAssertTrue(ChatView.avoidsVisibleTabBar)
+        XCTAssertTrue(ChatView.usesWindowedMessageRendering)
+        XCTAssertEqual(ChatView.initialRenderedMessageLimit, 10)
+        XCTAssertEqual(ChatView.maximumRenderedMessageLimit, 30)
+        XCTAssertEqual(ChatView.messageWindowShiftSize, 30)
+        XCTAssertTrue(MessageBubble.usesLongMessagePreviewRendering)
+        XCTAssertEqual(MessageBubble.longMessagePreviewCharacterLimit, 2200)
+        XCTAssertTrue(AILogEntry.storesBoundedRuntimePayloads)
+        XCTAssertTrue(TimeTavernStore.storesCompactedRuntimePayloads)
+        XCTAssertEqual(TimeTavernStore.maximumRuntimeAILogs, 80)
         XCTAssertLessThan(ChatView.composerBottomPadding, 24)
         XCTAssertEqual(
             ChatView.composerBottomPadding(tabInsetHeight: VisualNovelTabBar.safeAreaInsetHeight),
             ChatView.composerBottomPadding + VisualNovelTabBar.safeAreaInsetHeight
         )
+        XCTAssertTrue(LoadEarlierMessagesButton.revealsOlderMessagesWithoutMutatingConversation)
+        XCTAssertTrue(LoadNewerMessagesButton.revealsNewerMessagesWithoutMutatingConversation)
         XCTAssertFalse(RootView.shouldDisplayTabBar(selectedTab: .chat, tabBarVisible: false))
         XCTAssertTrue(RootView.shouldDisplayTabBar(selectedTab: .chat, tabBarVisible: true))
         XCTAssertTrue(RootView.shouldDisplayTabBar(selectedTab: .settings, tabBarVisible: false))
@@ -78,6 +89,53 @@ final class TimeTavernTests: XCTestCase {
         resetIDs.reset(.characters)
         XCTAssertEqual(resetIDs[.chat], chatID)
         XCTAssertNotEqual(resetIDs[.characters], characterID)
+    }
+
+    func testChatMessageWindowingOnlyRendersRecentConversationByDefault() {
+        let messages = (1...100).map { index in
+            ConversationMessage(id: "m\(index)", role: .assistant, content: "訊息 \(index)")
+        }
+
+        XCTAssertEqual(ChatView.normalizedWindowEndIndex(0, conversationCount: messages.count), 100)
+        XCTAssertEqual(ChatView.visibleMessageRange(conversationCount: messages.count, windowEndIndex: 0), 90..<100)
+        XCTAssertTrue(ChatView.hasHiddenEarlierMessages(conversationCount: messages.count, windowEndIndex: 0))
+        XCTAssertFalse(ChatView.hasHiddenNewerMessages(conversationCount: messages.count, windowEndIndex: 0))
+
+        let visible = ChatView.visibleMessages(from: messages, windowEndIndex: 0)
+        XCTAssertEqual(visible.count, 10)
+        XCTAssertEqual(visible.first?.id, "m91")
+        XCTAssertEqual(visible.last?.id, "m100")
+
+        let olderEndIndex = ChatView.windowEndIndexAfterLoadingEarlier(currentEndIndex: 0, conversationCount: messages.count)
+        XCTAssertEqual(olderEndIndex, 90)
+        XCTAssertEqual(ChatView.visibleMessageRange(conversationCount: messages.count, windowEndIndex: olderEndIndex), 60..<90)
+        let older = ChatView.visibleMessages(from: messages, windowEndIndex: olderEndIndex)
+        XCTAssertEqual(older.count, 30)
+        XCTAssertEqual(older.first?.id, "m61")
+        XCTAssertEqual(older.last?.id, "m90")
+        XCTAssertFalse(older.contains { $0.id == "m100" })
+        XCTAssertTrue(ChatView.hasHiddenNewerMessages(conversationCount: messages.count, windowEndIndex: olderEndIndex))
+
+        let newestEndIndex = ChatView.windowEndIndexAfterLoadingNewer(currentEndIndex: olderEndIndex, conversationCount: messages.count)
+        XCTAssertEqual(newestEndIndex, 100)
+        XCTAssertEqual(ChatView.visibleMessageRange(conversationCount: messages.count, windowEndIndex: newestEndIndex), 90..<100)
+        XCTAssertEqual(
+            ChatView.windowEndIndexAfterConversationCountChange(oldCount: 100, newCount: 102, currentEndIndex: 100),
+            102
+        )
+        XCTAssertTrue(
+            ChatView.shouldAutoScrollToCurrentAfterConversationCountChange(oldCount: 100, newCount: 102, currentEndIndex: 100)
+        )
+        XCTAssertTrue(ChatView.canScrollTo(.current, conversationCount: 102, windowEndIndex: 102))
+        XCTAssertEqual(
+            ChatView.windowEndIndexAfterConversationCountChange(oldCount: 100, newCount: 20, currentEndIndex: 90),
+            20
+        )
+        XCTAssertFalse(
+            ChatView.shouldAutoScrollToCurrentAfterConversationCountChange(oldCount: 100, newCount: 102, currentEndIndex: 90)
+        )
+        XCTAssertFalse(ChatView.canScrollTo(.current, conversationCount: 100, windowEndIndex: olderEndIndex))
+        XCTAssertTrue(ChatView.canScrollTo(.start, conversationCount: 100, windowEndIndex: 30))
     }
 
     @MainActor
@@ -211,6 +269,102 @@ final class TimeTavernTests: XCTestCase {
             role: .assistant
         )
         XCTAssertTrue(codeBlock.string.contains("let first = 1\nlet second = 2"))
+    }
+
+    func testLongMessageBubbleOnlyRendersPreviewInConversationList() {
+        let text = String(repeating: "長", count: MessageBubble.longMessagePreviewCharacterLimit + 500)
+        let message = ConversationMessage(role: .assistant, content: text)
+        let preview = MessageBubble.renderedDisplayText(for: message)
+
+        XCTAssertTrue(MessageBubble.shouldRenderPreviewOnly(text))
+        XCTAssertLessThan(preview.count, text.count)
+        XCTAssertTrue(preview.hasSuffix("……"))
+    }
+
+    func testAILogsStoreBoundedPreviewsInsteadOfFullPromptPayloads() {
+        let longPrompt = String(repeating: "P", count: AILogEntry.maxStoredRequestCharacters + 10_000)
+        let longResponse = String(repeating: "R", count: AILogEntry.maxStoredResponseCharacters + 10_000)
+        let log = AILogEntry(
+            requestMessages: [ChatAPIMessage(role: "system", content: longPrompt)],
+            responseText: longResponse,
+            debugReasoningContent: String(repeating: "T", count: AILogEntry.maxStoredReasoningCharacters + 1000)
+        )
+
+        XCTAssertLessThan(log.requestMessages.first?.content.count ?? 0, longPrompt.count)
+        XCTAssertLessThan(log.responseText.count, longResponse.count)
+        XCTAssertLessThanOrEqual(log.responseText.count, AILogEntry.maxStoredResponseCharacters)
+        XCTAssertTrue(log.responseText.contains("內容過長"))
+        XCTAssertLessThanOrEqual(log.debugReasoningContent.count, AILogEntry.maxStoredReasoningCharacters)
+    }
+
+    func testReplaySnapshotsKeepRuntimeButDropLargePromptRules() {
+        var profile = CompressionProfile(id: "standard", name: "標準")
+        profile.summary = "已壓縮內容"
+        profile.compressedThroughTurnNumber = 12
+        profile.contextCompression = CompressionContextConfig(
+            mainRules: String(repeating: "規", count: 4000),
+            models: [CompressionModel(name: "World", addRules: "add", deleteRules: "delete")]
+        )
+        profile.triggerActions = [CompressionTriggerAction(name: "觸發")]
+        profile.appendTerms = [CompressionAppendTerm(content: "追加")]
+        let mode = PromptModeConfig(
+            id: "multi",
+            dialogueContextRounds: 20,
+            mainRules: String(repeating: "主", count: 4000),
+            outputRules: String(repeating: "出", count: 4000),
+            reasonerHistory: String(repeating: "歷", count: 4000),
+            compressionProfiles: [profile]
+        )
+
+        let compacted = TimeTavernStore.compactedPromptModesForSnapshot([mode])
+        let compactedMode = compacted[0]
+        let compactedProfile = compactedMode.compressionProfiles[0]
+
+        XCTAssertEqual(compactedMode.dialogueContextRounds, 20)
+        XCTAssertEqual(compactedMode.mainRules, "")
+        XCTAssertEqual(compactedMode.outputRules, "")
+        XCTAssertEqual(compactedMode.reasonerHistory, "")
+        XCTAssertEqual(compactedProfile.summary, "已壓縮內容")
+        XCTAssertEqual(compactedProfile.compressedThroughTurnNumber, 12)
+        XCTAssertTrue(compactedProfile.contextCompression.mainRules.isEmpty)
+        XCTAssertTrue(compactedProfile.contextCompression.models.isEmpty)
+        XCTAssertTrue(compactedProfile.triggerActions.isEmpty)
+
+        var currentProfile = profile
+        currentProfile.summary = "目前內容"
+        currentProfile.compressedThroughTurnNumber = 99
+        let current = [
+            PromptModeConfig(
+                id: "multi",
+                dialogueContextRounds: 5,
+                mainRules: "保留規則",
+                compressionProfiles: [currentProfile]
+            )
+        ]
+        let restored = TimeTavernStore.promptModesByApplyingRuntimeSnapshot(compacted, to: current)
+        XCTAssertEqual(restored[0].mainRules, "保留規則")
+        XCTAssertEqual(restored[0].dialogueContextRounds, 20)
+        XCTAssertEqual(restored[0].compressionProfiles[0].summary, "已壓縮內容")
+        XCTAssertEqual(restored[0].compressionProfiles[0].compressedThroughTurnNumber, 12)
+
+        let session = SavedSession(
+            conversation: [
+                ConversationMessage(
+                    role: .user,
+                    content: "之前",
+                    stateBeforeTurnSnapshot: ConversationTurnSnapshot(promptModes: [mode])
+                )
+            ],
+            aiLogs: [
+                AILogEntry(
+                    requestMessages: [ChatAPIMessage(role: "system", content: String(repeating: "P", count: 20_000))],
+                    responseText: String(repeating: "R", count: 20_000)
+                )
+            ]
+        )
+        let compactedSession = TimeTavernStore.compactedSession(session)
+        XCTAssertEqual(compactedSession.conversation.first?.stateBeforeTurnSnapshot?.promptModes.first?.mainRules, "")
+        XCTAssertLessThan(compactedSession.aiLogs.first?.responseText.count ?? 0, 20_000)
     }
 
     func testModelContentShowsOnlyActiveRoleCardPromptMode() {

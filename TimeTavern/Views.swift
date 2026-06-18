@@ -637,8 +637,10 @@ struct ChatView: View {
     @State private var editText = ""
     @State private var showRegenerateConfirmation = false
     @State private var previewImage: ImagePreviewItem?
+    @State private var messageDetailRequest: MessageDetailRequest?
     @State private var didInitialScrollToCurrent = false
     @State private var scrollRequest: ChatScrollRequest?
+    @State private var visibleWindowEndIndex = 0
     @FocusState private var composerFocused: Bool
 
     static func shouldDismissComposerOnOutsideTap(isFocused: Bool) -> Bool {
@@ -649,6 +651,10 @@ struct ChatView: View {
     static let avoidsVisibleTabBar = true
     static let requiresRegenerateConfirmation = true
     static let opensAtCurrentConversationPosition = true
+    static let usesWindowedMessageRendering = true
+    static let initialRenderedMessageLimit = 10
+    static let maximumRenderedMessageLimit = 30
+    static let messageWindowShiftSize = 30
 
     static func initialScrollDestination(conversationIsEmpty: Bool, hasPerformedInitialScroll: Bool) -> ChatScrollDestination? {
         guard !conversationIsEmpty, !hasPerformedInitialScroll else { return nil }
@@ -657,6 +663,89 @@ struct ChatView: View {
 
     static func composerBottomPadding(tabInsetHeight: CGFloat) -> CGFloat {
         composerBottomPadding + tabInsetHeight
+    }
+
+    static func normalizedWindowEndIndex(_ endIndex: Int, conversationCount: Int) -> Int {
+        let count = max(conversationCount, 0)
+        guard count > 0 else { return 0 }
+        guard endIndex > 0 else { return count }
+        return min(max(endIndex, 1), count)
+    }
+
+    static func visibleMessageRange(conversationCount: Int, windowEndIndex: Int) -> Range<Int> {
+        let count = max(conversationCount, 0)
+        guard count > 0 else { return 0..<0 }
+        let end = normalizedWindowEndIndex(windowEndIndex, conversationCount: count)
+        let limit = end >= count ? initialRenderedMessageLimit : maximumRenderedMessageLimit
+        let start = max(0, end - min(limit, count))
+        return start..<end
+    }
+
+    static func windowEndIndexAfterConversationCountChange(oldCount: Int, newCount: Int, currentEndIndex: Int) -> Int {
+        let normalizedNewCount = max(newCount, 0)
+        guard normalizedNewCount > 0 else { return 0 }
+        if oldCount <= 0 || currentEndIndex <= 0 || currentEndIndex >= oldCount {
+            return normalizedNewCount
+        }
+        return min(currentEndIndex, normalizedNewCount)
+    }
+
+    static func shouldAutoScrollToCurrentAfterConversationCountChange(
+        oldCount: Int,
+        newCount: Int,
+        currentEndIndex: Int
+    ) -> Bool {
+        guard newCount > oldCount else { return false }
+        return oldCount <= 0 || currentEndIndex <= 0 || currentEndIndex >= oldCount
+    }
+
+    static func canScrollTo(_ destination: ChatScrollDestination, conversationCount: Int, windowEndIndex: Int) -> Bool {
+        let range = visibleMessageRange(conversationCount: conversationCount, windowEndIndex: windowEndIndex)
+        guard !range.isEmpty else { return false }
+        switch destination {
+        case .start:
+            return range.contains(0)
+        case .current:
+            return range.contains(max(conversationCount - 1, 0))
+        }
+    }
+
+    static func visibleMessages(from conversation: [ConversationMessage], windowEndIndex: Int) -> [ConversationMessage] {
+        let range = visibleMessageRange(conversationCount: conversation.count, windowEndIndex: windowEndIndex)
+        guard !range.isEmpty else { return [] }
+        return Array(conversation[range])
+    }
+
+    static func hasHiddenEarlierMessages(conversationCount: Int, windowEndIndex: Int) -> Bool {
+        visibleMessageRange(conversationCount: conversationCount, windowEndIndex: windowEndIndex).lowerBound > 0
+    }
+
+    static func hasHiddenNewerMessages(conversationCount: Int, windowEndIndex: Int) -> Bool {
+        visibleMessageRange(conversationCount: conversationCount, windowEndIndex: windowEndIndex).upperBound < max(conversationCount, 0)
+    }
+
+    static func windowEndIndexAfterLoadingEarlier(currentEndIndex: Int, conversationCount: Int) -> Int {
+        let range = visibleMessageRange(conversationCount: conversationCount, windowEndIndex: currentEndIndex)
+        return max(0, range.lowerBound)
+    }
+
+    static func windowEndIndexAfterLoadingNewer(currentEndIndex: Int, conversationCount: Int) -> Int {
+        let count = max(conversationCount, 0)
+        guard count > 0 else { return 0 }
+        let end = normalizedWindowEndIndex(currentEndIndex, conversationCount: count)
+        return min(count, end + messageWindowShiftSize)
+    }
+
+    private var visibleMessages: [ConversationMessage] {
+        Self.visibleMessages(from: store.state.conversation, windowEndIndex: visibleWindowEndIndex)
+    }
+
+    private var hasHiddenEarlierMessages: Bool {
+        Self.hasHiddenEarlierMessages(conversationCount: store.state.conversation.count, windowEndIndex: visibleWindowEndIndex)
+    }
+
+    private var hasHiddenNewerMessages: Bool {
+        Self.hasHiddenNewerMessages(conversationCount: store.state.conversation.count, windowEndIndex: visibleWindowEndIndex)
     }
 
     var body: some View {
@@ -690,7 +779,17 @@ struct ChatView: View {
                         ScrollViewReader { proxy in
                             ScrollView {
                                 LazyVStack(spacing: 12) {
-                                    ForEach(store.state.conversation) { message in
+                                    if hasHiddenEarlierMessages {
+                                        LoadEarlierMessagesButton(
+                                            hiddenCount: Self.visibleMessageRange(
+                                                conversationCount: store.state.conversation.count,
+                                                windowEndIndex: visibleWindowEndIndex
+                                            ).lowerBound,
+                                            action: loadEarlierMessages
+                                        )
+                                        .id(ChatScrollDestination.loadEarlierAnchorID)
+                                    }
+                                    ForEach(visibleMessages) { message in
                                         MessageRow(
                                             message: message,
                                             edit: {
@@ -704,30 +803,62 @@ struct ChatView: View {
                                             setFeedback: { feedback in
                                                 store.setMessageFeedback(id: message.id, feedback: feedback)
                                             },
+                                            openFullText: {
+                                                messageDetailRequest = MessageDetailRequest(messageID: message.id)
+                                            },
                                             previewImage: { imageData in
                                                 previewImage = ImagePreviewItem(title: uiStatic("生成圖片"), imageData: imageData)
                                             }
                                         )
                                             .id(message.id)
                                     }
+                                    if hasHiddenNewerMessages {
+                                        LoadNewerMessagesButton(
+                                            hiddenCount: max(
+                                                store.state.conversation.count - Self.visibleMessageRange(
+                                                    conversationCount: store.state.conversation.count,
+                                                    windowEndIndex: visibleWindowEndIndex
+                                                ).upperBound,
+                                                0
+                                            ),
+                                            action: loadNewerMessages
+                                        )
+                                        .id(ChatScrollDestination.loadNewerAnchorID)
+                                    }
                                 }
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 18)
                                 .padding(.bottom, 8)
                             }
-                            .onChange(of: store.state.conversation.count) { _, _ in
-                                if let last = store.state.conversation.last?.id {
-                                    withAnimation { proxy.scrollTo(last, anchor: .bottom) }
+                            .onChange(of: store.state.conversation.count) { oldCount, newCount in
+                                let shouldAutoScroll = Self.shouldAutoScrollToCurrentAfterConversationCountChange(
+                                    oldCount: oldCount,
+                                    newCount: newCount,
+                                    currentEndIndex: visibleWindowEndIndex
+                                )
+                                visibleWindowEndIndex = Self.windowEndIndexAfterConversationCountChange(
+                                    oldCount: oldCount,
+                                    newCount: newCount,
+                                    currentEndIndex: visibleWindowEndIndex
+                                )
+                                if shouldAutoScroll {
+                                    DispatchQueue.main.async {
+                                        scrollRequest = ChatScrollRequest(destination: .current)
+                                    }
                                 }
                             }
                             .onChange(of: scrollRequest) { _, request in
                                 guard let request else { return }
                                 scroll(to: request.destination, proxy: proxy, animated: true)
                             }
-                            .onAppear {
-                                guard let destination = Self.initialScrollDestination(
-                                    conversationIsEmpty: store.state.conversation.isEmpty,
-                                    hasPerformedInitialScroll: didInitialScrollToCurrent
+                                .onAppear {
+                                    visibleWindowEndIndex = Self.normalizedWindowEndIndex(
+                                        visibleWindowEndIndex,
+                                        conversationCount: store.state.conversation.count
+                                    )
+                                    guard let destination = Self.initialScrollDestination(
+                                        conversationIsEmpty: store.state.conversation.isEmpty,
+                                        hasPerformedInitialScroll: didInitialScrollToCurrent
                                 ) else { return }
                                 didInitialScrollToCurrent = true
                                 DispatchQueue.main.async {
@@ -774,6 +905,9 @@ struct ChatView: View {
             }
             .fullScreenCover(item: $previewImage) { item in
                 GeneratedImagePreview(item: item)
+            }
+            .sheet(item: $messageDetailRequest) { request in
+                MessageDetailView(message: store.state.conversation.first { $0.id == request.messageID })
             }
             .sheet(item: $replayMessage) { message in
                 NavigationStack {
@@ -827,10 +961,43 @@ struct ChatView: View {
 
     private func requestScroll(_ destination: ChatScrollDestination) {
         dismissComposerInput()
-        scrollRequest = ChatScrollRequest(destination: destination)
+        if destination == .start {
+            visibleWindowEndIndex = min(Self.maximumRenderedMessageLimit, store.state.conversation.count)
+            DispatchQueue.main.async {
+                scrollRequest = ChatScrollRequest(destination: destination)
+            }
+        } else if destination == .current {
+            visibleWindowEndIndex = store.state.conversation.count
+            DispatchQueue.main.async {
+                scrollRequest = ChatScrollRequest(destination: destination)
+            }
+        } else {
+            scrollRequest = ChatScrollRequest(destination: destination)
+        }
+    }
+
+    private func loadEarlierMessages() {
+        visibleWindowEndIndex = Self.windowEndIndexAfterLoadingEarlier(
+            currentEndIndex: visibleWindowEndIndex,
+            conversationCount: store.state.conversation.count
+        )
+    }
+
+    private func loadNewerMessages() {
+        visibleWindowEndIndex = Self.windowEndIndexAfterLoadingNewer(
+            currentEndIndex: visibleWindowEndIndex,
+            conversationCount: store.state.conversation.count
+        )
     }
 
     private func scroll(to destination: ChatScrollDestination, proxy: ScrollViewProxy, animated: Bool) {
+        guard Self.canScrollTo(
+            destination,
+            conversationCount: store.state.conversation.count,
+            windowEndIndex: visibleWindowEndIndex
+        ) else {
+            return
+        }
         guard let targetID = destination.targetID(in: store.state.conversation) else { return }
         let anchor: UnitPoint = destination == .start ? .top : .bottom
         let action = {
@@ -844,9 +1011,16 @@ struct ChatView: View {
     }
 }
 
+struct MessageDetailRequest: Identifiable, Equatable {
+    var messageID: String
+    var id: String { messageID }
+}
+
 enum ChatScrollDestination: String, Equatable {
     case start
     case current
+    static let loadEarlierAnchorID = "chat-load-earlier-anchor"
+    static let loadNewerAnchorID = "chat-load-newer-anchor"
 
     func targetID(in conversation: [ConversationMessage]) -> String? {
         switch self {
@@ -861,6 +1035,60 @@ enum ChatScrollDestination: String, Equatable {
 struct ChatScrollRequest: Equatable {
     var id = UUID()
     var destination: ChatScrollDestination
+}
+
+struct LoadEarlierMessagesButton: View {
+    var hiddenCount: Int
+    var action: () -> Void
+    static let revealsOlderMessagesWithoutMutatingConversation = true
+
+    var body: some View {
+        Button(action: action) {
+            Label(
+                uiStatic("載入上一段對話 \(hiddenCount)"),
+                systemImage: "arrow.up.circle"
+            )
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(VNTheme.accentSoft)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(VNTheme.ink.opacity(0.72), in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(VNTheme.accent.opacity(0.28), lineWidth: 1)
+                    .allowsHitTesting(false)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("chat-load-earlier-messages")
+    }
+}
+
+struct LoadNewerMessagesButton: View {
+    var hiddenCount: Int
+    var action: () -> Void
+    static let revealsNewerMessagesWithoutMutatingConversation = true
+
+    var body: some View {
+        Button(action: action) {
+            Label(
+                uiStatic("載入較新對話 \(hiddenCount)"),
+                systemImage: "arrow.down.circle"
+            )
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(VNTheme.accentSoft)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(VNTheme.ink.opacity(0.72), in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(VNTheme.accent.opacity(0.28), lineWidth: 1)
+                    .allowsHitTesting(false)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("chat-load-newer-messages")
+    }
 }
 
 struct ChatSceneHeader: View {
@@ -1075,6 +1303,7 @@ struct MessageRow: View {
     var edit: () -> Void
     var replay: () -> Void
     var setFeedback: (String) -> Void
+    var openFullText: () -> Void = {}
     var previewImage: (Data) -> Void = { _ in }
 
     static let usesInlineActionButtons = true
@@ -1082,7 +1311,7 @@ struct MessageRow: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            MessageBubble(message: message, previewImage: previewImage)
+            MessageBubble(message: message, openFullText: openFullText, previewImage: previewImage)
             MessageActionBar(
                 message: message,
                 edit: edit,
@@ -1163,10 +1392,13 @@ struct MessageActionBar: View {
 
 struct MessageBubble: View {
     var message: ConversationMessage
+    var openFullText: () -> Void = {}
     var previewImage: (Data) -> Void = { _ in }
     static let usesPartialTextSelectableView = true
     static let usesWebInspiredMarkdownSurface = true
     static let generatedImagesOpenPreviewOnTap = true
+    static let usesLongMessagePreviewRendering = true
+    static let longMessagePreviewCharacterLimit = 2200
     static let compressionNoticeText = "已壓縮上下文"
 
     var body: some View {
@@ -1182,11 +1414,19 @@ struct MessageBubble: View {
                         .foregroundStyle(VNTheme.accentSoft)
                 }
                 let displayText = Self.displayText(for: message)
-                if !displayText.isEmpty {
+                let renderedText = Self.renderedDisplayText(for: message)
+                if !renderedText.isEmpty {
                     SelectableMessageText(
-                        text: displayText,
+                        text: renderedText,
                         role: message.role,
                         isReasoningPreview: Self.isShowingReasoningPreview(message)
+                    )
+                }
+                if Self.shouldRenderPreviewOnly(displayText) {
+                    LongMessagePreviewFooter(
+                        fullCharacterCount: displayText.count,
+                        previewCharacterCount: Self.longMessagePreviewCharacterLimit,
+                        action: openFullText
                     )
                 }
                 if let imageData = message.imageData, let image = UIImage(data: imageData) {
@@ -1253,9 +1493,116 @@ struct MessageBubble: View {
         return message.streamingReasoningPreview
     }
 
+    static func shouldRenderPreviewOnly(_ text: String) -> Bool {
+        text.count > longMessagePreviewCharacterLimit
+    }
+
+    static func renderedDisplayText(for message: ConversationMessage) -> String {
+        previewText(displayText(for: message))
+    }
+
+    static func previewText(_ text: String) -> String {
+        guard shouldRenderPreviewOnly(text) else { return text }
+        return String(text.prefix(longMessagePreviewCharacterLimit))
+            .trimmingCharacters(in: .whitespacesAndNewlines) +
+            "\n\n……"
+    }
+
     static func isShowingReasoningPreview(_ message: ConversationMessage) -> Bool {
         message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
             !message.streamingReasoningPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+struct LongMessagePreviewFooter: View {
+    var fullCharacterCount: Int
+    var previewCharacterCount: Int
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "doc.text.magnifyingglass")
+                Text(uiStatic("內容過長，已預覽 \(previewCharacterCount) / \(fullCharacterCount) 字。查看完整內容"))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Spacer(minLength: 0)
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(VNTheme.accentSoft)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(VNTheme.ink.opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(VNTheme.accent.opacity(0.22), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("chat-open-full-message")
+    }
+}
+
+struct MessageDetailView: View {
+    @Environment(\.dismiss) private var dismiss
+    var message: ConversationMessage?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let message {
+                    PlainScrollableMessageTextView(
+                        text: MessageBubble.displayText(for: message),
+                        isReasoningPreview: MessageBubble.isShowingReasoningPreview(message)
+                    )
+                    .padding(16)
+                } else {
+                    Text(uiStatic("訊息已不存在"))
+                        .foregroundStyle(VNTheme.textSecondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .background(VisualNovelBackground())
+            .navigationTitle(uiStatic("完整內容"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(uiStatic("關閉")) { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+struct PlainScrollableMessageTextView: UIViewRepresentable {
+    var text: String
+    var isReasoningPreview = false
+
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.backgroundColor = UIColor.black.withAlphaComponent(0.28)
+        textView.layer.cornerRadius = 14
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isScrollEnabled = true
+        textView.textContainerInset = UIEdgeInsets(top: 14, left: 12, bottom: 14, right: 12)
+        textView.textContainer.lineFragmentPadding = 0
+        textView.adjustsFontForContentSizeCategory = true
+        textView.font = .preferredFont(forTextStyle: .body)
+        textView.textColor = isReasoningPreview
+            ? UIColor(red: 0.67, green: 0.64, blue: 0.78, alpha: 1)
+            : .white
+        textView.tintColor = UIColor(red: 1.0, green: 0.50, blue: 0.72, alpha: 1.0)
+        return textView
+    }
+
+    func updateUIView(_ textView: UITextView, context: Context) {
+        if textView.text != text {
+            textView.text = text
+        }
+        textView.textColor = isReasoningPreview
+            ? UIColor(red: 0.67, green: 0.64, blue: 0.78, alpha: 1)
+            : .white
     }
 }
 
@@ -5452,14 +5799,14 @@ struct LogView: View {
                         }
                         logBlock(
                             title: uiStatic("送給 AI 的內容"),
-                            text: Self.formatMessages(log.requestMessages)
+                            text: log.requestPreview.isEmpty ? Self.formatMessages(log.requestMessages) : log.requestPreview
                         )
-                        if !log.debugReasoningContent.isEmpty {
-                            logBlock(title: uiStatic("模型思考過程"), text: log.debugReasoningContent, accent: VNTheme.textSecondary)
+                        if !log.reasoningPreview.isEmpty {
+                            logBlock(title: uiStatic("模型思考過程"), text: log.reasoningPreview, accent: VNTheme.textSecondary)
                         }
                         logBlock(
                             title: log.error.isEmpty ? uiStatic("AI 輸出") : uiStatic("AI 輸出 / 錯誤內容"),
-                            text: log.error.isEmpty ? log.responseText : "\(log.responseText)\n\n[Error]\n\(log.error)",
+                            text: log.error.isEmpty ? log.responsePreview : "\(log.responsePreview)\n\n[Error]\n\(log.error)",
                             accent: log.error.isEmpty ? .white : .red
                         )
                     }
